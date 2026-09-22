@@ -21,6 +21,7 @@ Directed Acyclic Graphs
    antichains
    dag_longest_path
    dag_longest_path_length
+   dag_schedule
    dag_to_branching
    colliders
    v_structures

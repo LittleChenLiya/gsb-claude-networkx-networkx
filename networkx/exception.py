@@ -19,6 +19,7 @@ __all__ = [
     "NetworkXNoPath",
     "NetworkXNotImplemented",
     "NetworkXPointlessConcept",
+    "NetworkXUnfeasibleDeadline",
     "NetworkXUnbounded",
     "NetworkXUnfeasible",
 ]
@@ -71,6 +72,24 @@ class NetworkXNoPath(NetworkXUnfeasible):
 class NetworkXNoCycle(NetworkXUnfeasible):
     """Exception for algorithms that should return a cycle when running
     on graphs where such a cycle does not exist."""
+
+
+class NetworkXUnfeasibleDeadline(NetworkXUnfeasible):
+    """Raised when a deadline is earlier than the earliest possible
+    completion time of a DAG schedule.
+
+    The offending ``deadline`` and the minimum feasible ``makespan`` are
+    attached as attributes.
+    """
+
+    def __init__(self, deadline, makespan):
+        self.deadline = deadline
+        self.makespan = makespan
+        msg = (
+            f"deadline {deadline} is earlier than the earliest possible "
+            f"completion time {makespan}"
+        )
+        super().__init__(msg)
 
 
 class HasACycle(NetworkXException):
