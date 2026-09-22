@@ -13,6 +13,7 @@ __all__ = [
     "ExceededMaxIterations",
     "AmbiguousSolution",
     "NetworkXAlgorithmError",
+    "NetworkXDeadlineExceeded",
     "NetworkXException",
     "NetworkXError",
     "NetworkXNoCycle",
@@ -61,6 +62,22 @@ class NetworkXAlgorithmError(NetworkXException):
 class NetworkXUnfeasible(NetworkXAlgorithmError):
     """Exception raised by algorithms trying to solve a problem
     instance that has no feasible solution."""
+
+
+class NetworkXDeadlineExceeded(NetworkXUnfeasible):
+    """Exception raised when a scheduling deadline is infeasible.
+
+    Carries the infeasible ``deadline`` and the ``minimum_makespan``,
+    i.e. the earliest achievable completion time.
+    """
+
+    def __init__(self, deadline, minimum_makespan):
+        self.deadline = deadline
+        self.minimum_makespan = minimum_makespan
+        super().__init__(
+            f"deadline {deadline} is infeasible; "
+            f"the minimum feasible makespan is {minimum_makespan}"
+        )
 
 
 class NetworkXNoPath(NetworkXUnfeasible):

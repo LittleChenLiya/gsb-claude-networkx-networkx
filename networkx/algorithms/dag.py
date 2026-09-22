@@ -8,7 +8,8 @@ to the user to check for that.
 import heapq
 from collections import deque
 from itertools import combinations, product
-from math import gcd
+from math import gcd, isfinite
+from numbers import Real
 
 import networkx as nx
 from networkx.utils import not_implemented_for, pairwise
@@ -28,6 +29,7 @@ __all__ = [
     "antichains",
     "dag_longest_path",
     "dag_longest_path_length",
+    "dag_schedule",
     "dag_to_branching",
 ]
 
@@ -1224,6 +1226,178 @@ def dag_longest_path_length(G, weight="weight", default_weight=1):
             path_length += G[u][v].get(weight, default_weight)
 
     return path_length
+
+
+@nx._dispatchable
+def dag_schedule(G, duration="duration", release="release", lag="lag", deadline=None):
+    """Compute an earliest/latest-start schedule for a DAG of tasks.
+
+    Each node is a task with a processing time (`duration` attribute,
+    default 1) and an earliest time it may start (`release` attribute,
+    default 0). Each edge ``(u, v)`` means task ``v`` may start only
+    after ``u`` finishes plus a handoff delay (`lag` attribute, default 0).
+    All three values must be nonnegative finite numbers.
+
+    Parameters
+    ----------
+    G : NetworkX DiGraph
+        A directed acyclic graph. Undirected graphs and multigraphs
+        are not supported.
+    duration, release : str
+        Names of the node attributes holding the task duration and the
+        earliest start (release) time. Missing attributes default to 1
+        and 0 respectively.
+    lag : str
+        Name of the edge attribute holding the handoff delay between
+        dependent tasks. Missing attributes default to 0.
+    deadline : nonnegative finite number, optional
+        Required completion time. If omitted, the natural earliest
+        completion time (makespan) is used as the deadline, so every
+        task on a critical path has zero total float.
+
+    Returns
+    -------
+    dict
+        A dictionary with keys:
+
+        - ``"makespan"``: earliest achievable completion time.
+        - ``"earliest_start"``: dict mapping each node to its earliest
+          start time.
+        - ``"latest_start"``: dict mapping each node to its latest start
+          time that still meets the deadline.
+        - ``"total_float"``: dict mapping each node to its total float
+          (``latest_start - earliest_start``).
+        - ``"critical_path"``: a longest chain of binding constraints
+          (tasks and lags, possibly anchored by a release time) that
+          determines the makespan. Ties are broken by node insertion
+          order.
+
+    Raises
+    ------
+    NetworkXNotImplemented
+        If `G` is undirected or a multigraph.
+    NetworkXUnfeasible
+        If `G` contains a cycle.
+    NetworkXDeadlineExceeded
+        If `deadline` is earlier than the minimum feasible completion
+        time. The exception carries ``deadline`` and
+        ``minimum_makespan`` attributes.
+    NetworkXError
+        If a duration, release, lag, or deadline value is not a
+        nonnegative finite number.
+
+    Notes
+    -----
+    The schedule is computed with a forward/backward pass over a
+    topological order (the critical path method), so the running time
+    is $O(|V| + |E|)$.
+
+    Release times can determine the critical path: a task may be
+    critical because of when it becomes available, not because of any
+    incoming edge. The returned critical path therefore may start at a
+    node whose earliest start equals its release time.
+
+    An empty graph yields a makespan of 0, empty schedule dicts, and an
+    empty critical path.
+
+    The input graph and its attributes are not modified.
+
+    Examples
+    --------
+    >>> G = nx.DiGraph()
+    >>> G.add_node("A", duration=2)
+    >>> G.add_node("B", duration=4, release=1)
+    >>> G.add_node("C", duration=3)
+    >>> G.add_edge("A", "C")
+    >>> G.add_edge("B", "C", lag=2)
+    >>> sched = nx.dag_schedule(G, deadline=12)
+    >>> sched["earliest_start"]
+    {'A': 0, 'B': 1, 'C': 7}
+    >>> sched["latest_start"]
+    {'C': 9, 'B': 3, 'A': 7}
+    >>> sched["critical_path"]
+    ['B', 'C']
+    >>> sched["makespan"]
+    10
+    """
+    if not G.is_directed():
+        raise nx.NetworkXNotImplemented(
+            "dag_schedule is not implemented for undirected graphs"
+        )
+    if G.is_multigraph():
+        raise nx.NetworkXNotImplemented(
+            "dag_schedule is not implemented for multigraphs"
+        )
+
+    def _validate(value, what):
+        if not isinstance(value, Real) or not isfinite(value) or value < 0:
+            raise nx.NetworkXError(
+                f"{what} must be a nonnegative finite number, got {value!r}"
+            )
+        return value
+
+    durations = {}
+    releases = {}
+    for node, data in G.nodes(data=True):
+        durations[node] = _validate(data.get(duration, 1), f"duration of node {node!r}")
+        releases[node] = _validate(data.get(release, 0), f"release of node {node!r}")
+    lags = {}
+    for u, v, data in G.edges(data=True):
+        lags[(u, v)] = _validate(data.get(lag, 0), f"lag of edge ({u!r}, {v!r})")
+    if deadline is not None:
+        _validate(deadline, "deadline")
+
+    topo_order = list(nx.topological_sort(G))
+
+    earliest_start = {}
+    for v in topo_order:
+        start = releases[v]
+        for u in G.predecessors(v):
+            start = max(start, earliest_start[u] + durations[u] + lags[(u, v)])
+        earliest_start[v] = start
+    makespan = max((earliest_start[v] + durations[v] for v in G), default=0)
+
+    if deadline is not None and deadline < makespan:
+        raise nx.NetworkXDeadlineExceeded(deadline, makespan)
+    horizon = makespan if deadline is None else deadline
+
+    latest_start = {}
+    for v in reversed(topo_order):
+        finish = horizon
+        for w in G.successors(v):
+            finish = min(finish, latest_start[w] - lags[(v, w)])
+        latest_start[v] = finish - durations[v]
+    total_float = {v: latest_start[v] - earliest_start[v] for v in G}
+
+    insertion_order = {node: i for i, node in enumerate(G)}
+    critical_path = []
+    if G:
+        end = min(
+            (v for v in G if earliest_start[v] + durations[v] == makespan),
+            key=insertion_order.__getitem__,
+        )
+        critical_path.append(end)
+        current = end
+        while True:
+            binding = [
+                u
+                for u in G.predecessors(current)
+                if earliest_start[u] + durations[u] + lags[(u, current)]
+                == earliest_start[current]
+            ]
+            if not binding:
+                break
+            current = min(binding, key=insertion_order.__getitem__)
+            critical_path.append(current)
+        critical_path.reverse()
+
+    return {
+        "makespan": makespan,
+        "earliest_start": earliest_start,
+        "latest_start": latest_start,
+        "total_float": total_float,
+        "critical_path": critical_path,
+    }
 
 
 @nx._dispatchable

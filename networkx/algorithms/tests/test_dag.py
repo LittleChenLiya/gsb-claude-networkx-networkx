@@ -892,3 +892,185 @@ def test_colliders(edgelist, expected):
     G = nx.DiGraph(edgelist)
     colliders = set(nx.dag.colliders(G))
     assert colliders == expected
+
+
+class TestDagSchedule:
+    def test_acceptance_example(self):
+        G = nx.DiGraph()
+        G.add_node("A", duration=2)
+        G.add_node("B", duration=4, release=1)
+        G.add_node("C", duration=3)
+        G.add_edge("A", "C")
+        G.add_edge("B", "C", lag=2)
+        sched = nx.dag_schedule(G, deadline=12)
+        assert sched["makespan"] == 10
+        assert sched["earliest_start"] == {"A": 0, "B": 1, "C": 7}
+        assert sched["latest_start"] == {"A": 7, "B": 3, "C": 9}
+        assert sched["total_float"] == {"A": 7, "B": 2, "C": 2}
+        assert sched["critical_path"] == ["B", "C"]
+
+    def test_default_deadline_is_makespan(self):
+        G = nx.DiGraph()
+        G.add_node("A", duration=2)
+        G.add_node("B", duration=4, release=1)
+        G.add_node("C", duration=3)
+        G.add_edge("A", "C")
+        G.add_edge("B", "C", lag=2)
+        sched = nx.dag_schedule(G)
+        assert sched["makespan"] == 10
+        assert sched["latest_start"]["C"] == 7
+        assert sched["total_float"]["C"] == 0
+
+    def test_deadline_exceeded(self):
+        G = nx.DiGraph()
+        G.add_node("A", duration=2)
+        G.add_node("B", duration=4, release=1)
+        G.add_node("C", duration=3)
+        G.add_edge("A", "C")
+        G.add_edge("B", "C", lag=2)
+        with pytest.raises(nx.NetworkXDeadlineExceeded) as excinfo:
+            nx.dag_schedule(G, deadline=9)
+        assert excinfo.value.deadline == 9
+        assert excinfo.value.minimum_makespan == 10
+        assert "10" in str(excinfo.value)
+
+    def test_empty_graph(self):
+        sched = nx.dag_schedule(nx.DiGraph())
+        assert sched["makespan"] == 0
+        assert sched["earliest_start"] == {}
+        assert sched["latest_start"] == {}
+        assert sched["total_float"] == {}
+        assert sched["critical_path"] == []
+
+    def test_isolated_long_task_sets_makespan(self):
+        G = nx.DiGraph()
+        G.add_node("long", duration=50)
+        G.add_node("short", duration=1)
+        G.add_node("mid", duration=2)
+        G.add_edge("short", "mid")
+        sched = nx.dag_schedule(G)
+        assert sched["makespan"] == 50
+        assert sched["critical_path"] == ["long"]
+        assert sched["total_float"]["long"] == 0
+        assert sched["total_float"]["mid"] > 0
+
+    def test_zero_duration(self):
+        G = nx.DiGraph()
+        G.add_node("a", duration=0)
+        G.add_node("b", duration=0)
+        G.add_edge("a", "b")
+        sched = nx.dag_schedule(G)
+        assert sched["makespan"] == 0
+        assert sched["earliest_start"] == {"a": 0, "b": 0}
+        # both nodes finish at 0; the insertion-order tie-break picks "a"
+        assert sched["critical_path"] == ["a"]
+
+    def test_mixed_types_and_missing_attributes(self):
+        G = nx.DiGraph()
+        G.add_node("int", duration=2)
+        G.add_node("float", duration=1.5, release=0.5)
+        G.add_node("default")
+        G.add_edge("int", "float", lag=0.25)
+        G.add_edge("float", "default")
+        sched = nx.dag_schedule(G)
+        assert sched["earliest_start"]["float"] == 2.25
+        assert sched["earliest_start"]["default"] == 3.75
+        assert sched["makespan"] == 4.75
+
+    def test_multiple_sources_and_sinks(self):
+        G = nx.DiGraph()
+        for n in "abcd":
+            G.add_node(n, duration=1)
+        G.add_edge("a", "c")
+        G.add_edge("b", "c")
+        G.add_edge("a", "d")
+        sched = nx.dag_schedule(G)
+        assert sched["makespan"] == 2
+        assert set(sched["earliest_start"]) == set("abcd")
+        assert sched["critical_path"] == ["a", "c"]
+
+    def test_tie_broken_by_insertion_order_not_node_comparison(self):
+        class Token:
+            def __init__(self, name):
+                self.name = name
+
+            def __repr__(self):
+                return self.name
+
+        t1, t2, t3 = Token("t1"), Token("t2"), Token("t3")
+        G = nx.DiGraph()
+        G.add_node(t2, duration=1)
+        G.add_node(t1, duration=1)
+        G.add_node(t3, duration=1)
+        G.add_edge(t1, t3)
+        G.add_edge(t2, t3)
+        sched = nx.dag_schedule(G)
+        # t2 was inserted first, so it wins the tie; node objects are
+        # never compared with each other
+        assert sched["critical_path"] == [t2, t3]
+
+    def test_cycle_raises(self):
+        G = nx.DiGraph([(1, 2), (2, 3), (3, 1)])
+        with pytest.raises(nx.NetworkXUnfeasible):
+            nx.dag_schedule(G)
+
+    def test_undirected_not_supported(self):
+        with pytest.raises(nx.NetworkXNotImplemented):
+            nx.dag_schedule(nx.Graph([(1, 2)]))
+
+    def test_multidigraph_not_supported(self):
+        with pytest.raises(nx.NetworkXNotImplemented):
+            nx.dag_schedule(nx.MultiDiGraph([(1, 2)]))
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), -1, "x", None])
+    def test_invalid_duration(self, bad):
+        G = nx.DiGraph()
+        G.add_node(1, duration=bad)
+        with pytest.raises(nx.NetworkXError):
+            nx.dag_schedule(G)
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), -0.5])
+    def test_invalid_release(self, bad):
+        G = nx.DiGraph()
+        G.add_node(1, release=bad)
+        with pytest.raises(nx.NetworkXError):
+            nx.dag_schedule(G)
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), -2])
+    def test_invalid_lag(self, bad):
+        G = nx.DiGraph()
+        G.add_edge(1, 2, lag=bad)
+        with pytest.raises(nx.NetworkXError):
+            nx.dag_schedule(G)
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), -1])
+    def test_invalid_deadline(self, bad):
+        G = nx.DiGraph()
+        G.add_node(1)
+        with pytest.raises(nx.NetworkXError):
+            nx.dag_schedule(G, deadline=bad)
+
+    def test_input_graph_not_modified(self):
+        G = nx.DiGraph()
+        G.add_node("A", duration=2)
+        G.add_node("B", duration=4, release=1)
+        G.add_node("C", duration=3)
+        G.add_edge("A", "C")
+        G.add_edge("B", "C", lag=2)
+        nodes_before = {n: dict(d) for n, d in G.nodes(data=True)}
+        edges_before = {(u, v): dict(d) for u, v, d in G.edges(data=True)}
+        nx.dag_schedule(G, deadline=12)
+        assert {n: dict(d) for n, d in G.nodes(data=True)} == nodes_before
+        assert {(u, v): dict(d) for u, v, d in G.edges(data=True)} == edges_before
+
+    def test_release_anchors_critical_path(self):
+        # The binding constraint on "gate" is its release time, not any
+        # incoming edge, so the critical path starts there.
+        G = nx.DiGraph()
+        G.add_node("gate", duration=1, release=10)
+        G.add_node("done", duration=1)
+        G.add_edge("gate", "done")
+        sched = nx.dag_schedule(G)
+        assert sched["makespan"] == 12
+        assert sched["critical_path"] == ["gate", "done"]
+        assert sched["total_float"] == {"gate": 0, "done": 0}
