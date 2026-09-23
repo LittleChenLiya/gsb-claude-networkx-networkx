@@ -90,3 +90,13 @@ Utils for flow-based connectivity
 
     build_auxiliary_edge_connectivity
     build_auxiliary_node_connectivity
+
+
+Temporal components
+-------------------
+.. automodule:: networkx.algorithms.connectivity.temporal_components
+.. autosummary::
+   :toctree: generated/
+
+   temporal_connected_components
+

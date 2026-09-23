@@ -132,3 +132,4 @@ from networkx.algorithms.tree.mst import *
 from networkx.algorithms.tree.operations import *
 from networkx.algorithms.tree.recognition import *
 from networkx.algorithms.tournament import is_tournament
+from networkx.algorithms.connectivity import temporal_connected_components
