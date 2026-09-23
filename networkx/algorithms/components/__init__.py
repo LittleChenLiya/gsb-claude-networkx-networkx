@@ -1,4 +1,5 @@
 from .connected import *
+from .interval_queries import *
 from .strongly_connected import *
 from .weakly_connected import *
 from .attracting import *

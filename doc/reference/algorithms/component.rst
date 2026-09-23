@@ -15,6 +15,15 @@ Connectivity
    connected_components
    node_connected_component
 
+.. _networkx.algorithms.components.interval_queries:
+
+Interval connectivity
+---------------------
+.. autosummary::
+   :toctree: generated/
+
+   interval_connected_components
+
 .. _networkx.algorithms.components.strongly_connected:
 
 Strong connectivity
