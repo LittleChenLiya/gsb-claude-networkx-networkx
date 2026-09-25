@@ -1,3 +1,4 @@
+import random
 from collections import deque
 from itertools import combinations, permutations
 
@@ -498,6 +499,114 @@ class TestDAG:
         G = nx.DiGraph([(1, 2), (2, 3), (3, 1)])
         with pytest.raises(nx.NetworkXUnfeasible, match="Graph contains a cycle"):
             nx.dag.antichain_width(G)
+
+    def test_minimum_path_cover(self):
+        G = nx.DiGraph([("a", "b"), ("a", "c"), ("b", "d"), ("c", "d")])
+        G.add_node("e")
+        cover = nx.minimum_path_cover(G)
+        assert len(cover) == 3
+        assert sorted(sorted(p) for p in cover) == [["a", "b", "d"], ["c"], ["e"]]
+        # Deterministic across repeated calls on the same graph.
+        assert nx.minimum_path_cover(G) == cover
+
+    def test_minimum_path_cover_empty(self):
+        assert nx.minimum_path_cover(nx.DiGraph()) == []
+
+    def test_minimum_path_cover_chain(self):
+        G = nx.path_graph(5, create_using=nx.DiGraph)
+        assert nx.minimum_path_cover(G) == [[0, 1, 2, 3, 4]]
+
+    def test_minimum_path_cover_diamond(self):
+        G = nx.DiGraph([(1, 2), (1, 3), (2, 4), (3, 4)])
+        cover = nx.minimum_path_cover(G)
+        assert len(cover) == 2
+        assert sorted(sorted(p) for p in cover) == [[1, 2, 4], [3]]
+
+    def test_minimum_path_cover_isolated_nodes(self):
+        G = nx.DiGraph()
+        G.add_nodes_from([1, 2, 3])
+        assert nx.minimum_path_cover(G) == [[1], [2], [3]]
+
+    def test_minimum_path_cover_does_not_mutate_graph(self):
+        G = nx.DiGraph()
+        G.add_node(0, color="red")
+        G.add_edge(0, 1, weight=7)
+        nodes_before = dict(G.nodes(data=True))
+        edges_before = list(G.edges(data=True))
+        cover = nx.minimum_path_cover(G)
+        cover[0].append("junk")
+        assert dict(G.nodes(data=True)) == nodes_before
+        assert list(G.edges(data=True)) == edges_before
+        assert list(G) == [0, 1]
+
+    def test_minimum_path_cover_exceptions(self):
+        G = nx.Graph([(1, 2), (2, 3)])
+        with pytest.raises(nx.NetworkXNotImplemented):
+            nx.minimum_path_cover(G)
+
+        G = nx.MultiDiGraph([(1, 2), (1, 2)])
+        with pytest.raises(nx.NetworkXNotImplemented):
+            nx.minimum_path_cover(G)
+
+        G = nx.DiGraph([(1, 2), (2, 3), (3, 1)])
+        with pytest.raises(nx.NetworkXUnfeasible, match="Graph contains a cycle"):
+            nx.minimum_path_cover(G)
+
+        G = nx.DiGraph([(1, 1)])
+        with pytest.raises(nx.NetworkXUnfeasible, match="Graph contains a cycle"):
+            nx.minimum_path_cover(G)
+
+    @staticmethod
+    def _brute_force_min_path_cover_size(G):
+        # Maximum number of cover edges: subsets of E with in/out-degree <= 1.
+        # Such a subset is acyclic because G is a DAG, so it links paths.
+        edges = list(G.edges())
+        best = 0
+        for size in range(1, len(edges) + 1):
+            for subset in combinations(edges, size):
+                out_deg = {}
+                in_deg = {}
+                for u, v in subset:
+                    out_deg[u] = out_deg.get(u, 0) + 1
+                    in_deg[v] = in_deg.get(v, 0) + 1
+                if max(out_deg.values()) <= 1 and max(in_deg.values()) <= 1:
+                    best = size
+        return len(G) - best
+
+    def _check_path_cover(self, G, cover):
+        # Every node appears exactly once.
+        assert sorted(n for p in cover for n in p) == sorted(G.nodes())
+        # Consecutive nodes are joined by a real edge, not just reachability.
+        for path in cover:
+            for u, v in pairwise(path):
+                assert G.has_edge(u, v)
+        # The cover is minimum.
+        assert len(cover) == self._brute_force_min_path_cover_size(G)
+
+    def test_minimum_path_cover_small_dags_exhaustive(self):
+        # All DAGs on up to 4 nodes (edges consistent with order 0..n-1).
+        for n in range(5):
+            pairs = [(i, j) for i in range(n) for j in range(i + 1, n)]
+            for mask in range(2 ** len(pairs)):
+                G = nx.DiGraph()
+                G.add_nodes_from(range(n))
+                G.add_edges_from(e for k, e in enumerate(pairs) if mask >> k & 1)
+                self._check_path_cover(G, nx.minimum_path_cover(G))
+
+    def test_minimum_path_cover_random_dags(self):
+        # Sampled DAGs on 5 and 6 nodes, including random node orderings.
+        rng = random.Random(42)
+        for n in (5, 6):
+            for _ in range(200):
+                order = list(range(n))
+                rng.shuffle(order)
+                pairs = [
+                    (order[i], order[j]) for i in range(n) for j in range(i + 1, n)
+                ]
+                G = nx.DiGraph()
+                G.add_nodes_from(order)
+                G.add_edges_from(e for e in pairs if rng.random() < 0.4)
+                self._check_path_cover(G, nx.minimum_path_cover(G))
 
     def _check_antichains(self, solution, result):
         sol = [frozenset(a) for a in solution]

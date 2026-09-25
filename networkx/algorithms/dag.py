@@ -26,6 +26,7 @@ __all__ = [
     "transitive_closure_dag",
     "transitive_reduction",
     "antichains",
+    "minimum_path_cover",
     "dag_longest_path",
     "dag_longest_path_length",
     "dag_to_branching",
@@ -223,6 +224,96 @@ def antichain_width(G):
 
     matching = nx.bipartite.maximum_matching(B, top_nodes=left)
     return len(nodes) - len(matching) // 2
+
+
+@not_implemented_for("multigraph")
+@not_implemented_for("undirected")
+@nx._dispatchable
+def minimum_path_cover(G):
+    """Returns a minimum set of node-disjoint paths covering every node of `G`.
+
+    A path cover of a directed graph is a collection of node-disjoint
+    paths such that every node of the graph belongs to exactly one path.
+    This function returns a path cover with the fewest possible paths.
+    Consecutive nodes in a returned path are joined by an edge of `G`
+    (merely being reachable is not sufficient), and isolated nodes form
+    single-node paths.
+
+    The minimum path cover is computed by a reduction to maximum bipartite
+    matching [1]_: each node `v` is split into a left copy and a right
+    copy, and each edge ``(u, v)`` of `G` becomes an edge between the
+    left copy of `u` and the right copy of `v`. A maximum matching then
+    corresponds to a maximum set of consecutive node pairs, so a minimum
+    path cover consists of ``len(G) - |matching|`` paths.
+
+    Parameters
+    ----------
+    G : NetworkX DiGraph
+        A directed acyclic graph.
+
+    Returns
+    -------
+    list of lists
+        A minimum path cover of `G`. Each path is a list of nodes, and
+        every node of `G` appears in exactly one path.
+
+    Raises
+    ------
+    NetworkXNotImplemented
+        If `G` is undirected or is a multigraph.
+
+    NetworkXUnfeasible
+        If `G` contains a cycle.
+
+    Examples
+    --------
+    >>> G = nx.DiGraph([(0, 1), (0, 2), (1, 3), (2, 3)])
+    >>> G.add_node(4)
+    >>> nx.minimum_path_cover(G)
+    [[0, 1, 3], [2], [4]]
+
+    Notes
+    -----
+    Ties between equally optimal covers are broken by node insertion
+    order, so repeated calls on the same graph return the same cover.
+    The returned lists are new objects; neither they nor the attributes
+    of `G` are shared with or modified by this function.
+
+    References
+    ----------
+    .. [1] https://en.wikipedia.org/wiki/Path_cover
+    """
+    if not nx.is_directed_acyclic_graph(G):
+        raise nx.NetworkXUnfeasible("Graph contains a cycle or is not a DAG.")
+
+    # Index nodes by insertion order so the bipartite matching below is
+    # deterministic and ties are broken by that order.
+    nodes = list(G)
+    node_index = {v: i for i, v in enumerate(nodes)}
+    n = len(nodes)
+
+    B = nx.Graph()
+    B.add_nodes_from(range(2 * n))
+    B.add_edges_from((node_index[u], n + node_index[v]) for u, v in G.edges())
+
+    matching = nx.bipartite.maximum_matching(B, top_nodes=range(n))
+
+    # Matched edges become consecutive pairs in the cover: the left copy
+    # of u matched to the right copy of v means v directly follows u.
+    successors = {left: right - n for left, right in matching.items() if left < n}
+    has_predecessor = set(successors.values())
+
+    paths = []
+    for i in range(n):
+        if i in has_predecessor:
+            continue
+        path = [nodes[i]]
+        j = i
+        while j in successors:
+            j = successors[j]
+            path.append(nodes[j])
+        paths.append(path)
+    return paths
 
 
 @nx._dispatchable

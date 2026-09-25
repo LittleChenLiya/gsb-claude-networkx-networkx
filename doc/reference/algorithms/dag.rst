@@ -19,6 +19,7 @@ Directed Acyclic Graphs
    transitive_closure_dag
    transitive_reduction
    antichains
+   minimum_path_cover
    dag_longest_path
    dag_longest_path_length
    dag_to_branching
