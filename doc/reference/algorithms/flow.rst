@@ -16,6 +16,16 @@ Maximum Flow
    minimum_cut
    minimum_cut_value
 
+.. _networkx.algorithms.flow.lowerboundcirculation:
+
+Circulation With Lower Bounds
+-----------------------------
+.. autosummary::
+   :toctree: generated/
+
+   lower_bound_circulation
+   InfeasibleCirculationError
+
 .. _networkx.algorithms.flow.edmondskarp:
 
 Edmonds-Karp

@@ -8,4 +8,5 @@ from .preflowpush import *
 from .shortestaugmentingpath import *
 from .capacityscaling import *
 from .networksimplex import *
+from .lowerboundcirculation import *
 from .utils import build_flow_dict, build_residual_network
