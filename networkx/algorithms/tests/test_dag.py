@@ -892,3 +892,175 @@ def test_colliders(edgelist, expected):
     G = nx.DiGraph(edgelist)
     colliders = set(nx.dag.colliders(G))
     assert colliders == expected
+
+
+def _reference_topological_order(G):
+    """Independent full topological sort (Kahn's algorithm, FIFO queue).
+
+    Used only to validate the incremental index in these tests; it is not
+    part of the incremental update path.
+    """
+    indegree = {v: d for v, d in G.in_degree() if d > 0}
+    queue = deque(v for v, d in G.in_degree() if d == 0)
+    order = []
+    while queue:
+        node = queue.popleft()
+        order.append(node)
+        for child in G.successors(node):
+            indegree[child] -= 1
+            if indegree[child] == 0:
+                del indegree[child]
+                queue.append(child)
+    if len(order) != G.number_of_nodes():
+        raise AssertionError("reference sort failed: graph contains a cycle")
+    return order
+
+
+def _assert_valid_topological_order(order, G):
+    position = {node: i for i, node in enumerate(order)}
+    assert len(position) == len(order) == G.number_of_nodes()
+    assert set(position) == set(G.nodes)
+    for u, v in G.edges:
+        assert position[u] < position[v]
+
+
+def _assert_cycle_witness(witness, G, batch_edges):
+    # The witness is a closed loop ...
+    assert len(witness) >= 1
+    for (u, v), (w, x) in zip(witness, witness[1:] + witness[:1]):
+        assert v == w
+    # ... composed of actual edges (existing ones or edges of the batch).
+    actual = set(G.edges) | set(batch_edges)
+    assert all(edge in actual for edge in witness)
+
+
+class TestIncrementalTopologicalOrder:
+    def test_initial_order_and_positions(self):
+        G = nx.DiGraph([("A", "C"), ("B", "C")])
+        idx = nx.IncrementalTopologicalOrder(G)
+        assert idx.order == ["A", "B", "C"]
+        assert [idx.position(n) for n in "ABC"] == [0, 1, 2]
+        assert len(idx) == 3
+        assert "A" in idx and "Z" not in idx
+        assert list(idx) == idx.order
+        with pytest.raises(nx.NetworkXError):
+            idx.position("missing")
+
+    def test_initial_graph_with_cycle_raises(self):
+        with pytest.raises(nx.NetworkXUnfeasible):
+            nx.IncrementalTopologicalOrder(nx.DiGraph([(1, 2), (2, 1)]))
+
+    def test_undirected_graph_raises(self):
+        with pytest.raises(nx.NetworkXError):
+            nx.IncrementalTopologicalOrder(nx.Graph([(1, 2)]))
+
+    def test_initial_graph_is_copied(self):
+        G = nx.DiGraph([(1, 2)])
+        idx = nx.IncrementalTopologicalOrder(G)
+        G.add_edge(2, 3)
+        assert idx.order == [1, 2]
+
+    def test_acceptance_scenario(self):
+        G = nx.DiGraph([("A", "C"), ("B", "C")])
+        idx = nx.IncrementalTopologicalOrder(G)
+        assert idx.apply_batch(edges=[("B", "A")]) is None
+        assert idx.position("B") < idx.position("A")
+        order_before = idx.order
+        edges_before = sorted(idx.graph.edges())
+        nodes_before = sorted(idx.graph.nodes())
+        witness = idx.apply_batch(edges=[("C", "B")])
+        assert witness == [("B", "C"), ("C", "B")]
+        _assert_cycle_witness(witness, idx.graph, [("C", "B")])
+        # The rejected batch leaves graph and index untouched.
+        assert idx.order == order_before
+        assert sorted(idx.graph.edges()) == edges_before
+        assert sorted(idx.graph.nodes()) == nodes_before
+
+    def test_rollback_removes_batch_nodes(self):
+        idx = nx.IncrementalTopologicalOrder(nx.DiGraph([(1, 2)]))
+        witness = idx.apply_batch(nodes=[3, 4], edges=[(2, 3), (3, 4), (4, 2)])
+        assert witness == [(2, 3), (3, 4), (4, 2)]
+        _assert_cycle_witness(witness, idx.graph, [(2, 3), (3, 4), (4, 2)])
+        assert idx.order == [1, 2]
+        assert set(idx.graph.nodes()) == {1, 2}
+        assert sorted(idx.graph.edges()) == [(1, 2)]
+
+    def test_duplicate_edges_no_side_effects(self):
+        idx = nx.IncrementalTopologicalOrder(nx.DiGraph([(1, 2), (2, 3)]))
+        order_before = idx.order
+        edges_before = sorted(idx.graph.edges())
+        assert idx.apply_batch(edges=[(1, 2), (2, 3), (1, 2)]) is None
+        assert idx.order == order_before
+        assert sorted(idx.graph.edges()) == edges_before
+        assert idx.last_batch_visits == 0
+
+    def test_unknown_endpoint_must_be_declared(self):
+        idx = nx.IncrementalTopologicalOrder(nx.DiGraph([(1, 2)]))
+        with pytest.raises(nx.NetworkXError):
+            idx.apply_batch(edges=[(2, 99)])
+        with pytest.raises(nx.NetworkXError):
+            idx.apply_batch(edges=[(99, 1)])
+        assert idx.order == [1, 2]
+        assert sorted(idx.graph.edges()) == [(1, 2)]
+
+    def test_empty_batch(self):
+        idx = nx.IncrementalTopologicalOrder(nx.DiGraph([(1, 2)]))
+        assert idx.apply_batch() is None
+        assert idx.apply_batch(nodes=[], edges=[]) is None
+        assert idx.order == [1, 2]
+        assert idx.last_batch_visits == 0
+
+    def test_self_loop_rejected(self):
+        idx = nx.IncrementalTopologicalOrder(nx.DiGraph([(1, 2)]))
+        witness = idx.apply_batch(nodes=[3], edges=[(2, 3), (3, 3)])
+        assert witness == [(3, 3)]
+        assert idx.order == [1, 2]
+        assert 3 not in idx.graph
+
+    def test_declare_then_reference_same_batch(self):
+        idx = nx.IncrementalTopologicalOrder(nx.DiGraph([(1, 2)]))
+        assert idx.apply_batch(nodes=[3, 4], edges=[(2, 3), (3, 4)]) is None
+        assert idx.order == [1, 2, 3, 4]
+        _assert_valid_topological_order(idx.order, idx.graph)
+
+    def test_mixed_type_nodes(self):
+        G = nx.DiGraph([("a", 1), (1, "b"), ("a", "b")])
+        idx = nx.IncrementalTopologicalOrder(G)
+        result = idx.apply_batch(nodes=[2.5, (3, 4)], edges=[("b", 2.5), (2.5, (3, 4))])
+        assert result is None
+        _assert_valid_topological_order(idx.order, idx.graph)
+        witness = idx.apply_batch(edges=[((3, 4), "a")])
+        assert witness is not None
+        _assert_cycle_witness(witness, idx.graph, [((3, 4), "a")])
+        _assert_valid_topological_order(idx.order, idx.graph)
+
+    def test_local_update_does_not_scan_unrelated_branches(self):
+        G = nx.DiGraph()
+        # Unrelated 100-node chain plus a small disjoint component.
+        G.add_edges_from(pairwise(f"x{i}" for i in range(100)))
+        G.add_edge("p", "q")
+        idx = nx.IncrementalTopologicalOrder(G)
+        # Initial order is x0, p, x1, q, x2, ..., x99 (FIFO Kahn), so this
+        # edge only affects the small interval around p and x1.
+        assert idx.apply_batch(edges=[("x1", "p")]) is None
+        assert idx.position("x1") < idx.position("p")
+        # Only the affected interval {p, x1} is scanned, not the x2..x99 tail.
+        assert idx.last_batch_visits == 2
+        assert idx.visits == 2
+        _assert_valid_topological_order(idx.order, idx.graph)
+
+    def test_random_batches_against_reference(self):
+        import random
+
+        rng = random.Random(42)
+        G = nx.DiGraph()
+        G.add_nodes_from(range(10))
+        idx = nx.IncrementalTopologicalOrder(G)
+        for _ in range(50):
+            u, v = rng.sample(range(10), 2)
+            witness = idx.apply_batch(edges=[(u, v)])
+            if witness is not None:
+                _assert_cycle_witness(witness, idx.graph, [(u, v)])
+            _assert_valid_topological_order(idx.order, idx.graph)
+        # Same node set as an independent full re-sort of the final graph.
+        assert set(idx.order) == set(_reference_topological_order(idx.graph))

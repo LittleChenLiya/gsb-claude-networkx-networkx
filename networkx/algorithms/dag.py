@@ -17,6 +17,7 @@ __all__ = [
     "descendants",
     "ancestors",
     "topological_sort",
+    "IncrementalTopologicalOrder",
     "lexicographical_topological_sort",
     "all_topological_sorts",
     "topological_generations",
@@ -641,6 +642,278 @@ def all_topological_sorts(G):
 
         if len(bases) == 0:
             break
+
+
+class IncrementalTopologicalOrder:
+    """Maintains a topological order of a DAG updated in batches.
+
+    The index is initialized from a directed acyclic graph and then updated
+    incrementally with :meth:`apply_batch`, which adds a batch of nodes and
+    edges atomically. Instead of re-sorting the whole graph after every
+    batch, only the interval of the order affected by the new edges is
+    rearranged (Pearce--Kelly style incremental update [1]_).
+
+    Parameters
+    ----------
+    G : NetworkX DiGraph
+        The initial directed acyclic graph. The graph is copied, so later
+        external mutations of `G` do not affect the index.
+
+    Attributes
+    ----------
+    visits : int
+        Total number of nodes visited by the reordering searches since
+        initialization. Useful to confirm that updates stay local.
+    last_batch_visits : int
+        Number of nodes visited by the reordering searches during the most
+        recent :meth:`apply_batch` call.
+
+    Examples
+    --------
+    >>> G = nx.DiGraph([("A", "C"), ("B", "C")])
+    >>> idx = nx.IncrementalTopologicalOrder(G)
+    >>> idx.order
+    ['A', 'B', 'C']
+    >>> idx.apply_batch(edges=[("B", "A")]) is None  # accepted
+    True
+    >>> idx.order  # B must now precede A
+    ['B', 'A', 'C']
+    >>> witness = idx.apply_batch(edges=[("C", "B")])  # would create a cycle
+    >>> witness  # closed loop of actual edges; batch was rolled back
+    [('B', 'C'), ('C', 'B')]
+    >>> idx.order
+    ['B', 'A', 'C']
+
+    Notes
+    -----
+    Initialization costs ``O(V + E)`` (Kahn's algorithm with a FIFO queue, so
+    ties are broken by node insertion order and nodes are never compared with
+    each other). :meth:`apply_batch` with ``k`` new edges costs ``O(k)`` plus
+    work proportional to the nodes and edges in the affected interval of the
+    current order for each inserted edge -- unrelated branches of the graph
+    are never scanned. Querying :meth:`position` is ``O(1)``; :meth:`order`
+    costs ``O(V)`` because it returns a copy.
+
+    See also
+    --------
+    topological_sort
+
+    References
+    ----------
+    .. [1] Pearce, D. J., & Kelly, P. H. J. (2007).
+       "A dynamic topological sort algorithm for directed acyclic graphs."
+       ACM Journal of Experimental Algorithmics, 11.
+    """
+
+    def __init__(self, G):
+        if not G.is_directed():
+            raise nx.NetworkXError(
+                "IncrementalTopologicalOrder is only defined for directed graphs."
+            )
+        self._graph = G.copy()
+        # Initial order: Kahn's algorithm with a FIFO queue. Ties are broken
+        # by node insertion order; node objects are never compared.
+        indegree = {v: d for v, d in self._graph.in_degree() if d > 0}
+        queue = deque(v for v, d in self._graph.in_degree() if d == 0)
+        order = []
+        while queue:
+            node = queue.popleft()
+            order.append(node)
+            for child in self._graph.successors(node):
+                indegree[child] -= 1
+                if indegree[child] == 0:
+                    del indegree[child]
+                    queue.append(child)
+        if len(order) != self._graph.number_of_nodes():
+            raise nx.NetworkXUnfeasible(
+                "The initial graph contains a cycle; no topological order exists."
+            )
+        self._order = order
+        self._position = {node: i for i, node in enumerate(order)}
+        self._visits = 0
+        self._last_batch_visits = 0
+
+    @property
+    def visits(self):
+        """Total nodes visited by reordering searches since initialization."""
+        return self._visits
+
+    @property
+    def last_batch_visits(self):
+        """Nodes visited by reordering searches in the last ``apply_batch``."""
+        return self._last_batch_visits
+
+    @property
+    def graph(self):
+        """A snapshot copy of the internally maintained graph."""
+        return self._graph.copy()
+
+    @property
+    def order(self):
+        """The current topological order as a list of nodes."""
+        return list(self._order)
+
+    def position(self, node):
+        """Returns the position of `node` in the current topological order.
+
+        Raises
+        ------
+        NetworkXError
+            If `node` is not in the index.
+        """
+        try:
+            return self._position[node]
+        except KeyError as err:
+            raise nx.NetworkXError(f"Node {node!r} is not in the index.") from err
+
+    def __iter__(self):
+        return iter(self._order)
+
+    def __len__(self):
+        return len(self._order)
+
+    def __contains__(self, node):
+        return node in self._position
+
+    def apply_batch(self, nodes=None, edges=None):
+        """Applies a batch of new nodes and edges atomically.
+
+        Parameters
+        ----------
+        nodes : iterable of nodes, optional
+            New nodes to add. Nodes already in the index are ignored. Every
+            edge endpoint that is not already in the index must be declared
+            here.
+        edges : iterable of (u, v) pairs, optional
+            New directed edges to add. Edges already present in the graph
+            (or repeated within the batch) have no side effects.
+
+        Returns
+        -------
+        None or list of edges
+            ``None`` if the batch was accepted. If the batch would introduce
+            a cycle, the whole batch (including its new nodes) is rolled
+            back and a witness is returned: a list of actual edges
+            ``[(u1, u2), (u2, u3), ..., (uk, u1)]`` forming a directed cycle.
+
+        Raises
+        ------
+        NetworkXError
+            If an edge endpoint is neither in the index nor declared in
+            `nodes` for this batch.
+        """
+        nodes = list(nodes) if nodes is not None else []
+        edges = [tuple(e) for e in edges] if edges is not None else []
+        self._last_batch_visits = 0
+        G = self._graph
+
+        new_nodes = list(dict.fromkeys(n for n in nodes if n not in G))
+        known = set(G.nodes) | set(new_nodes)
+        for u, v in edges:
+            if u not in known or v not in known:
+                raise nx.NetworkXError(
+                    f"Edge ({u!r}, {v!r}) has an endpoint that is neither in "
+                    "the index nor declared in `nodes` for this batch."
+                )
+
+        # Deduplicate: edges already in the graph or repeated within the
+        # batch are dropped and have no side effects.
+        batch_edges = []
+        seen = set()
+        for u, v in edges:
+            if (u, v) not in seen and not G.has_edge(u, v):
+                seen.add((u, v))
+                batch_edges.append((u, v))
+
+        # Work on copies so a rejected batch leaves the index untouched.
+        order = list(self._order)
+        position = dict(self._position)
+        applied = []
+        for node in new_nodes:
+            G.add_node(node)
+            position[node] = len(order)
+            order.append(node)
+        try:
+            for u, v in batch_edges:
+                witness = self._insert_edge(u, v, order, position)
+                if witness is not None:
+                    raise _CycleIntroduced(witness)
+                G.add_edge(u, v)
+                applied.append((u, v))
+        except _CycleIntroduced as err:
+            G.remove_edges_from(applied)
+            G.remove_nodes_from(new_nodes)
+            return err.witness
+        self._order = order
+        self._position = position
+        return None
+
+    def _insert_edge(self, u, v, order, position):
+        """Inserts edge (u, v) into the tentative order, or finds a cycle.
+
+        Returns ``None`` if the edge can be accommodated, otherwise a list
+        of actual edges forming a directed cycle through (u, v). Only the
+        interval ``[position[v], position[u]]`` of the order is examined
+        and rearranged; the rest of the order is left untouched.
+        """
+        if u == v:
+            return [(u, v)]
+        pu, pv = position[u], position[v]
+        if pu < pv:
+            return None  # order already valid; no cycle possible
+        # Forward search from v, bounded above by position[u]. Reaching u
+        # proves a path v -> ... -> u exists, so (u, v) closes a cycle.
+        parent = {v: None}
+        forward = []
+        stack = [v]
+        while stack:
+            node = stack.pop()
+            self._visits += 1
+            self._last_batch_visits += 1
+            forward.append(node)
+            for child in self._graph.successors(node):
+                if child == u:
+                    parent[u] = node
+                    chain = [u]
+                    while chain[-1] != v:
+                        chain.append(parent[chain[-1]])
+                    chain.reverse()
+                    return list(pairwise(chain)) + [(u, v)]
+                if position[child] <= pu and child not in parent:
+                    parent[child] = node
+                    stack.append(child)
+        # Backward search from u, bounded below by position[v].
+        backward = []
+        seen = {u}
+        stack = [u]
+        while stack:
+            node = stack.pop()
+            self._visits += 1
+            self._last_batch_visits += 1
+            backward.append(node)
+            for pred in self._graph.predecessors(node):
+                if position[pred] >= pv and pred not in seen:
+                    seen.add(pred)
+                    stack.append(pred)
+        # Rearrange only the slots occupied by the visited nodes: the
+        # backward set (in old relative order) goes first, then the
+        # forward set. Relative orders are preserved, so no node objects
+        # are ever compared.
+        forward.sort(key=position.__getitem__)
+        backward.sort(key=position.__getitem__)
+        slots = sorted(position[n] for n in forward + backward)
+        for node, slot in zip(backward + forward, slots):
+            order[slot] = node
+            position[node] = slot
+        return None
+
+
+class _CycleIntroduced(Exception):
+    """Internal signal carrying a cycle witness out of ``apply_batch``."""
+
+    def __init__(self, witness):
+        super().__init__("batch introduces a cycle")
+        self.witness = witness
 
 
 @not_implemented_for("undirected")
