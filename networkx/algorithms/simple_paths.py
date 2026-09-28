@@ -6,6 +6,7 @@ from networkx.algorithms.shortest_paths.weighted import _weight_function
 from networkx.utils import not_implemented_for, pairwise
 
 __all__ = [
+    "DAGPathIndex",
     "all_simple_paths",
     "is_simple_path",
     "shortest_simple_paths",
@@ -758,6 +759,248 @@ def _bidirectional_pred_succ(G, source, target, ignore_nodes=None, ignore_edges=
                         return pred, succ, w
 
     raise nx.NetworkXNoPath(f"No path between {source} and {target}.")
+
+
+class DAGPathIndex:
+    """An index of the simple paths from each node to one fixed ``target``.
+
+    For a simple directed acyclic graph (DAG), this class counts, for
+    every node, the number of simple directed paths from the node to a
+    fixed target node.  The resulting counts define a zero-based ranking
+    of the paths: paths are ordered lexicographically with the neighbors
+    of each node listed in the graph's node insertion order.  Given a
+    valid index, :meth:`path_at` returns the corresponding path directly,
+    without first enumerating all the paths; :meth:`index_of_path`
+    performs the inverse lookup.
+
+    Path counts are Python integers, so they remain exact even when the
+    number of paths exceeds 64 bits.
+
+    The index is built from a snapshot of the graph.  Adding, removing or
+    modifying nodes or edges of ``G`` after construction does not affect
+    an existing index.
+
+    Parameters
+    ----------
+    G : NetworkX DiGraph
+        A simple directed acyclic graph.  Undirected graphs and
+        multigraphs are not supported.
+    target : node
+        The node at which every indexed path ends.  If ``source`` equals
+        ``target``, the single path is the empty path consisting of the
+        target node alone.
+
+    Raises
+    ------
+    NetworkXError
+        If ``G`` is undirected.
+    NetworkXNotImplemented
+        If ``G`` is a multigraph.
+    NodeNotFound
+        If ``target`` is not in ``G``.
+    HasACycle
+        If ``G`` contains a directed cycle.
+
+    Examples
+    --------
+    >>> G = nx.DiGraph(
+    ...     [
+    ...         (0, 1),
+    ...         (0, 2),
+    ...         (1, 3),
+    ...         (1, 4),
+    ...         (2, 3),
+    ...         (2, 4),
+    ...         (3, 5),
+    ...         (4, 5),
+    ...     ]
+    ... )
+    >>> index = nx.DAGPathIndex(G, 5)
+    >>> index.number_of_paths(0)
+    4
+    >>> print(index.number_of_paths(0), index.path_at(0, 2))
+    4 [0, 2, 3, 5]
+    >>> index.index_of_path([0, 2, 3, 5])
+    2
+    >>> index.path_at(0, 3)
+    [0, 2, 4, 5]
+    >>> index.path_at(5, 0)
+    [5]
+    """
+
+    def __init__(self, G, target):
+        if not G.is_directed():
+            raise nx.NetworkXError("DAGPathIndex is defined for directed graphs only.")
+        if G.is_multigraph():
+            raise nx.NetworkXNotImplemented(
+                "DAGPathIndex is not implemented for multigraphs."
+            )
+        if target not in G:
+            raise nx.NodeNotFound(f"Target {target} is not in the graph.")
+
+        self._target = target
+
+        # Snapshot the adjacency.  Neighbors are ordered by the node
+        # insertion order of G at the time the index is built.
+        node_order = {node: position for position, node in enumerate(G.nodes)}
+        self._succ = {u: sorted(G.succ[u], key=node_order.__getitem__) for u in G.nodes}
+
+        # Materializing the topological order also rejects cyclic graphs.
+        try:
+            reverse_order = reversed(list(nx.topological_sort(G)))
+        except nx.NetworkXUnfeasible as err:
+            raise nx.HasACycle(
+                "DAGPathIndex requires a directed acyclic graph."
+            ) from err
+
+        # ``path_count[u]`` is the number of paths from ``u`` to target.
+        path_count = {u: 0 for u in self._succ}
+        path_count[target] = 1
+        for u in reverse_order:
+            if u == target:
+                continue
+            path_count[u] = sum(path_count[v] for v in self._succ[u])
+        self._path_count = path_count
+
+    @property
+    def target(self):
+        """The node at which every indexed path ends."""
+        return self._target
+
+    def number_of_paths(self, source):
+        """Return the number of simple paths from ``source`` to the target.
+
+        Parameters
+        ----------
+        source : node
+            Starting node.  Nodes that cannot reach the target have zero
+            paths.
+
+        Returns
+        -------
+        int
+            The number of simple paths from ``source`` to ``target``
+            (``1`` when ``source == target``).
+
+        Raises
+        ------
+        NodeNotFound
+            If ``source`` is not in the indexed graph.
+        """
+        try:
+            return self._path_count[source]
+        except KeyError:
+            raise nx.NodeNotFound(f"Source {source} is not in the indexed graph.")
+
+    def path_at(self, source, index):
+        """Return the path with zero-based rank ``index`` from ``source``.
+
+        Paths are ranked lexicographically, with the neighbors of each
+        node ordered by the graph's node insertion order.  The path is
+        reconstructed directly from the stored counts; intermediate paths
+        are never enumerated.
+
+        Parameters
+        ----------
+        source : node
+            Starting node.
+        index : int
+            Zero-based path rank, with ``0 <= index < number_of_paths(source)``.
+
+        Returns
+        -------
+        list of nodes
+            The simple path from ``source`` to the target with rank
+            ``index``.  When ``source`` equals the target, ``index`` must
+            be ``0`` and ``[target]`` is returned.
+
+        Raises
+        ------
+        NodeNotFound
+            If ``source`` is not in the indexed graph.
+        TypeError
+            If ``index`` is not an integer.
+        IndexError
+            If ``index`` is negative or not smaller than the number of
+            paths from ``source`` (in particular, when ``source`` cannot
+            reach the target).
+        """
+        total = self.number_of_paths(source)
+        if not isinstance(index, int) or isinstance(index, bool):
+            raise TypeError("index must be an integer.")
+        if index < 0 or index >= total:
+            raise IndexError(
+                f"index {index} is out of range for {total} path(s) "
+                f"from {source} to {self._target}."
+            )
+
+        path = [source]
+        current = source
+        remaining = index
+        while current != self._target:
+            offset = 0
+            for nxt in self._succ[current]:
+                count = self._path_count[nxt]
+                if remaining < offset + count:
+                    remaining -= offset
+                    current = nxt
+                    break
+                offset += count
+            path.append(current)
+        return path
+
+    def index_of_path(self, path):
+        """Return the zero-based rank of a valid path to the target.
+
+        This is the inverse of :meth:`path_at`.
+
+        Parameters
+        ----------
+        path : iterable of nodes
+            A simple path in the indexed graph ending at the target.
+
+        Returns
+        -------
+        int
+            The zero-based rank of ``path``.
+
+        Raises
+        ------
+        NodeNotFound
+            If ``path`` contains a node that is not in the indexed graph.
+        NetworkXError
+            If ``path`` is empty, not simple, does not end at the target,
+            starts at a node that cannot reach the target, or uses an edge
+            that is not in the indexed graph.
+        """
+        path = list(path)
+        if not path:
+            raise nx.NetworkXError("path must be a nonempty sequence of nodes.")
+        if any(node not in self._path_count for node in path):
+            raise nx.NodeNotFound("path contains a node not in the indexed graph.")
+        if len(set(path)) != len(path):
+            raise nx.NetworkXError("path is not simple: it contains repeated nodes.")
+        source = path[0]
+        if path[-1] != self._target:
+            raise nx.NetworkXError(
+                f"path does not end at the target node {self._target}."
+            )
+        if self._path_count[source] == 0:
+            raise nx.NetworkXError(
+                f"node {source} cannot reach target {self._target} in the indexed graph."
+            )
+
+        index = 0
+        for u, v in pairwise(path):
+            for w in self._succ[u]:
+                if w == v:
+                    break
+                index += self._path_count[w]
+            else:
+                raise nx.NetworkXError(
+                    f"path is not valid: there is no edge {u} -> {v}."
+                )
+        return index
 
 
 def _bidirectional_dijkstra(

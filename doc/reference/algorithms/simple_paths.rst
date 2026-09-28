@@ -9,4 +9,5 @@ Simple Paths
    all_simple_paths
    all_simple_edge_paths
    is_simple_path
-   shortest_simple_paths
+    shortest_simple_paths
+    DAGPathIndex
