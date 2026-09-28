@@ -29,6 +29,7 @@ __all__ = [
     "dag_longest_path",
     "dag_longest_path_length",
     "dag_to_branching",
+    "DAGPathIndex",
 ]
 
 
@@ -1061,7 +1062,7 @@ def antichains(G, topo_order=None):
     antichains_stacks = [([], list(reversed(topo_order)))]
 
     while antichains_stacks:
-        (antichain, stack) = antichains_stacks.pop()
+        antichain, stack = antichains_stacks.pop()
         # Invariant:
         #  - the elements of antichain are independent
         #  - the elements of stack are independent from those of antichain
@@ -1460,3 +1461,221 @@ def colliders(G):
     for node in G.nodes:
         for p1, p2 in combinations(G.predecessors(node), 2):
             yield (p1, node, p2)
+
+
+class DAGPathIndex:
+    """Index of the simple paths from any node to one fixed target in a DAG.
+
+    The index is built once over a *snapshot* of ``G``. Later modifications
+    to ``G`` do not affect an existing index. Paths are ordered lexicographically
+    by node order: at each node its successors are visited in the order in
+    which the nodes were added to ``G`` when the index was created.
+
+    Paths are counted with arbitrary precision Python integers, so counts are
+    correct even if they exceed 64-bit integer limits. Building the index does
+    not enumerate the paths, and neither does :meth:`get_path`; the work per
+    lookup is linear in the length of the returned path.
+
+    Parameters
+    ----------
+    G : NetworkX DiGraph
+        A simple directed acyclic graph. MultiDiGraphs and undirected graphs
+        are not supported.
+    target : node
+        The destination node for all paths indexed by this instance.
+
+    Raises
+    ------
+    NetworkXNotImplemented
+        If ``G`` is undirected or a multigraph.
+    NetworkXError
+        If ``target`` is not in ``G`` or ``G`` contains a directed cycle.
+
+    Examples
+    --------
+    >>> G = nx.DiGraph(
+    ...     [("s", "a"), ("s", "b"), ("a", "c"), ("b", "c"),
+    ...      ("c", "d"), ("c", "e"), ("d", "t"), ("e", "t")]
+    ... )
+    >>> index = nx.DAGPathIndex(G, "t")
+    >>> index.path_count("s")
+    4
+    >>> index.get_path("s", 0)
+    ['s', 'a', 'c', 'd', 't']
+    >>> index.get_path("s", 3)
+    ['s', 'b', 'c', 'e', 't']
+    >>> index.index_of_path(['s', 'b', 'c', 'e', 't'])
+    3
+
+    When ``source == target`` the single path is the empty path containing
+    only the target node:
+
+    >>> index.path_count("t")
+    1
+    >>> index.get_path("t", 0)
+    ['t']
+    """
+
+    def __init__(self, G, target):
+        if not G.is_directed():
+            raise nx.NetworkXNotImplemented("DAGPathIndex requires a directed graph.")
+        if G.is_multigraph():
+            raise nx.NetworkXNotImplemented(
+                "DAGPathIndex is not implemented for multigraphs."
+            )
+        if target not in G:
+            raise nx.NetworkXError(f"The target node {target!r} is not in G.")
+        if not is_directed_acyclic_graph(G):
+            raise nx.NetworkXError("G is not a directed acyclic graph.")
+
+        self._target = target
+
+        # Snapshot the graph structure. Successors are stored in node
+        # insertion order, which is the order of G.nodes at build time.
+        node_order = {node: position for position, node in enumerate(G.nodes)}
+        self._succ = {
+            node: sorted(G.succ[node], key=node_order.__getitem__) for node in G.nodes
+        }
+
+        # Number of paths from each node to the target. Processed in reverse
+        # topological order so successors are counted first.
+        self._counts = {node: 0 for node in G.nodes}
+        self._counts[target] = 1
+        for node in reversed(list(topological_sort(G))):
+            self._counts[node] += sum(
+                self._counts[successor] for successor in self._succ[node]
+            )
+
+    @property
+    def target(self):
+        """The destination node fixed for this index."""
+        return self._target
+
+    def path_count(self, source):
+        """Return the number of simple paths from ``source`` to the target.
+
+        Parameters
+        ----------
+        source : node
+            A node of the graph used to build the index.
+
+        Returns
+        -------
+        int
+            The number of paths from ``source`` to the target. This is ``0``
+            when ``source`` cannot reach the target, and ``1`` when
+            ``source == target`` (the empty path).
+
+        Raises
+        ------
+        NetworkXError
+            If ``source`` is not a node of the indexed graph.
+        """
+        try:
+            return self._counts[source]
+        except KeyError:
+            raise nx.NetworkXError(
+                f"The source node {source!r} is not in the indexed graph."
+            ) from None
+
+    def get_path(self, source, index):
+        """Return the ``index``-th path (zero-based) from ``source``.
+
+        Paths are ordered as described in the class documentation. Paths are
+        not enumerated: at each node the successors are scanned and the one
+        covering ``index`` is selected.
+
+        Parameters
+        ----------
+        source : node
+            A node of the graph used to build the index.
+        index : int
+            Zero-based path number, with ``0 <= index < path_count(source)``.
+
+        Returns
+        -------
+        list
+            The nodes of the selected path, including ``source`` and the
+            target. For ``source == target`` this is ``[target]``.
+
+        Raises
+        ------
+        NetworkXError
+            If ``source`` is not a node of the indexed graph.
+        IndexError
+            If ``index`` is negative or not smaller than ``path_count``
+            for ``source`` (including when ``source`` cannot reach the
+            target).
+        """
+        total = self.path_count(source)
+        if not isinstance(index, int) or isinstance(index, bool):
+            raise TypeError("index must be an integer.")
+        if index < 0 or index >= total:
+            raise IndexError(
+                f"path index {index} out of range for source {source!r}; "
+                f"there are {total} paths."
+            )
+
+        path = [source]
+        current = source
+        remaining = index
+        while current != self._target:
+            for successor in self._succ[current]:
+                block = self._counts[successor]
+                if remaining < block:
+                    current = successor
+                    path.append(current)
+                    break
+                remaining -= block
+        return path
+
+    def index_of_path(self, path):
+        """Return the zero-based index of a legal path to the target.
+
+        This is the inverse of :meth:`get_path`: for any legal ``path``
+        starting at a node of the indexed graph,
+        ``get_path(path[0], index_of_path(path)) == path``.
+
+        Parameters
+        ----------
+        path : iterable of nodes
+            A simple path in the indexed graph ending at the target.
+
+        Returns
+        -------
+        int
+            The zero-based index of ``path``.
+
+        Raises
+        ------
+        NetworkXError
+            If ``path`` is empty, contains a node not in the indexed graph,
+            repeats a node, uses an edge not present in the indexed graph
+            snapshot, or does not end at the target.
+        """
+        path = list(path)
+        if not path:
+            raise nx.NetworkXError("path must be a nonempty list of nodes.")
+        for node in path:
+            if node not in self._succ:
+                raise nx.NetworkXError(f"Node {node!r} is not in the indexed graph.")
+        if len(set(path)) != len(path):
+            raise nx.NetworkXError(f"path {path!r} is not a simple path.")
+        if path[-1] != self._target:
+            raise nx.NetworkXError(
+                f"path {path!r} does not end at the target {self._target!r}."
+            )
+
+        result = 0
+        for current, next_node in pairwise(path):
+            successors = self._succ[current]
+            if next_node not in successors:
+                raise nx.NetworkXError(
+                    f"{current!r} -> {next_node!r} is not an edge "
+                    "of the indexed graph."
+                )
+            for successor in successors:
+                if successor == next_node:
+                    break
+                result += self._counts[successor]
+        return result

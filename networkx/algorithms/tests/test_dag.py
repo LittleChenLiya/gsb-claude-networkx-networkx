@@ -892,3 +892,171 @@ def test_colliders(edgelist, expected):
     G = nx.DiGraph(edgelist)
     colliders = set(nx.dag.colliders(G))
     assert colliders == expected
+
+
+def _four_path_layered_graph():
+    edges = [
+        ("s", "a"),
+        ("s", "b"),
+        ("a", "c"),
+        ("b", "c"),
+        ("c", "d"),
+        ("c", "e"),
+        ("d", "t"),
+        ("e", "t"),
+    ]
+    return nx.DiGraph(edges)
+
+
+class TestDAGPathIndex:
+    def test_layered_graph_matches_all_simple_paths(self):
+        G = _four_path_layered_graph()
+        index = nx.DAGPathIndex(G, "t")
+        expected = list(nx.all_simple_paths(G, "s", "t"))
+        assert index.path_count("s") == len(expected) == 4
+        assert [index.get_path("s", i) for i in range(4)] == expected
+
+    @pytest.mark.parametrize("i", range(4))
+    def test_layered_graph_roundtrip(self, i):
+        G = _four_path_layered_graph()
+        index = nx.DAGPathIndex(G, "t")
+        path = index.get_path("s", i)
+        assert index.index_of_path(path) == i
+
+    def test_explicit_layered_order(self):
+        G = _four_path_layered_graph()
+        index = nx.DAGPathIndex(G, "t")
+        assert index.get_path("s", 0) == ["s", "a", "c", "d", "t"]
+        assert index.get_path("s", 1) == ["s", "a", "c", "e", "t"]
+        assert index.get_path("s", 2) == ["s", "b", "c", "d", "t"]
+        assert index.get_path("s", 3) == ["s", "b", "c", "e", "t"]
+
+    def test_count_exceeds_64_bits(self):
+        # 65 binary choices in sequence give 2 ** 65 paths. Each stage is a
+        # small diamond: split_i -> {top_i, bottom_i} -> split_{i+1}.
+        edges = []
+        node_id = 1
+        current = 0
+        for _ in range(65):
+            top = node_id
+            bottom = node_id + 1
+            node_id += 2
+            nxt = node_id
+            node_id += 1
+            edges.extend([(current, top), (current, bottom), (top, nxt), (bottom, nxt)])
+            current = nxt
+        target = current
+        G = nx.DiGraph(edges)
+        index = nx.DAGPathIndex(G, target)
+
+        total = 2**65
+        assert index.path_count(0) == total
+        assert total > 2**64
+
+        first = index.get_path(0, 0)
+        last = index.get_path(0, total - 1)
+        assert len(first) == len(last) == 131
+        assert first[0] == last[0] == 0
+        assert first[-1] == last[-1] == target
+        assert first != last
+        assert index.index_of_path(first) == 0
+        assert index.index_of_path(last) == total - 1
+
+    def test_cyclic_graph_rejected(self):
+        G = nx.DiGraph([(1, 2), (2, 3), (3, 1)])
+        with pytest.raises(nx.NetworkXError, match="acyclic"):
+            nx.DAGPathIndex(G, 3)
+
+    def test_empty_graph_rejected(self):
+        G = nx.DiGraph()
+        with pytest.raises(nx.NetworkXError, match="target"):
+            nx.DAGPathIndex(G, 0)
+
+    def test_index_is_snapshot(self):
+        G = _four_path_layered_graph()
+        index = nx.DAGPathIndex(G, "t")
+        G.add_edge("a", "e")
+        G.remove_edge("s", "b")
+        G.add_node("z")
+        # The index still sees the graph as it was at build time.
+        assert index.path_count("s") == 4
+        assert index.get_path("s", 3) == ["s", "b", "c", "e", "t"]
+        with pytest.raises(nx.NetworkXError, match="not in the indexed graph"):
+            index.path_count("z")
+
+    def test_unreachable_source(self):
+        G = _four_path_layered_graph()
+        G.add_node("x")
+        index = nx.DAGPathIndex(G, "t")
+        assert index.path_count("x") == 0
+        with pytest.raises(IndexError, match="out of range"):
+            index.get_path("x", 0)
+
+    def test_source_equals_target(self):
+        G = _four_path_layered_graph()
+        index = nx.DAGPathIndex(G, "t")
+        assert index.path_count("t") == 1
+        assert index.get_path("t", 0) == ["t"]
+        assert index.index_of_path(["t"]) == 0
+
+    def test_index_out_of_range(self):
+        G = _four_path_layered_graph()
+        index = nx.DAGPathIndex(G, "t")
+        with pytest.raises(IndexError, match="out of range"):
+            index.get_path("s", 4)
+        with pytest.raises(IndexError, match="out of range"):
+            index.get_path("s", -1)
+        with pytest.raises(TypeError, match="integer"):
+            index.get_path("s", 1.5)
+
+    def test_missing_nodes(self):
+        G = _four_path_layered_graph()
+        index = nx.DAGPathIndex(G, "t")
+        with pytest.raises(nx.NetworkXError, match="target"):
+            nx.DAGPathIndex(G, "missing")
+        with pytest.raises(nx.NetworkXError, match="source"):
+            index.path_count("missing")
+
+    def test_invalid_paths(self):
+        G = _four_path_layered_graph()
+        index = nx.DAGPathIndex(G, "t")
+        with pytest.raises(nx.NetworkXError, match="nonempty"):
+            index.index_of_path([])
+        with pytest.raises(nx.NetworkXError, match="does not end"):
+            index.index_of_path(["s", "a"])
+        with pytest.raises(nx.NetworkXError, match="not an edge"):
+            index.index_of_path(["s", "c", "d", "t"])
+        with pytest.raises(nx.NetworkXError, match="not in the indexed graph"):
+            index.index_of_path(["s", "z", "t"])
+
+    def test_repeated_node_path_rejected(self):
+        G = nx.path_graph(4, create_using=nx.DiGraph)
+        index = nx.DAGPathIndex(G, 3)
+        with pytest.raises(nx.NetworkXError, match="simple path"):
+            index.index_of_path([0, 1, 0, 1, 2, 3])
+
+    def test_successors_follow_node_insertion_order(self):
+        G = nx.DiGraph()
+        G.add_edge(0, 2)
+        G.add_edge(0, 1)
+        G.add_edge(2, 3)
+        G.add_edge(1, 3)
+        # Edge insertion differs from node insertion: nodes 2 then 1.
+        assert list(G.successors(0)) == [2, 1]
+        index = nx.DAGPathIndex(G, 3)
+        assert index.get_path(0, 0) == [0, 2, 3]
+        assert index.get_path(0, 1) == [0, 1, 3]
+        assert index.index_of_path([0, 1, 3]) == 1
+
+    def test_undirected_and_multigraph_rejected(self):
+        G = nx.path_graph(3)
+        with pytest.raises(nx.NetworkXNotImplemented):
+            nx.DAGPathIndex(G, 2)
+        MG = nx.MultiDiGraph([(0, 1), (0, 1), (1, 2)])
+        with pytest.raises(nx.NetworkXNotImplemented):
+            nx.DAGPathIndex(MG, 2)
+
+    def test_index_attribute(self):
+        G = _four_path_layered_graph()
+        index = nx.DAGPathIndex(G, "t")
+        assert index.target == "t"
