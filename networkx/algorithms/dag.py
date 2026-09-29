@@ -18,6 +18,7 @@ __all__ = [
     "ancestors",
     "topological_sort",
     "lexicographical_topological_sort",
+    "minimum_path_cover",
     "all_topological_sorts",
     "topological_generations",
     "is_directed_acyclic_graph",
@@ -223,6 +224,136 @@ def antichain_width(G):
 
     matching = nx.bipartite.maximum_matching(B, top_nodes=left)
     return len(nodes) - len(matching) // 2
+
+
+@not_implemented_for("multigraph")
+@not_implemented_for("undirected")
+@nx._dispatchable
+def minimum_path_cover(G):
+    r"""Returns a minimum path cover of the directed acyclic graph `G`.
+
+    A path cover is a collection of directed paths that together contain
+    every node exactly once. Consecutive nodes in each path are connected by
+    an edge of `G`; reachability through intermediate nodes is not treated as
+    a direct connection.
+
+    The minimum number of paths is found with a maximum matching in a
+    bipartite graph. Each node of `G` appears once in each bipartition, and
+    a bipartite edge is added for each directed edge of `G`. Every matched
+    edge joins two consecutive nodes in a path, so a graph with ``n`` nodes
+    and a matching of size ``m`` has a path cover with ``n - m`` paths.
+    Isolated nodes therefore form one-node paths.
+
+    Parameters
+    ----------
+    G : NetworkX DiGraph
+        A simple directed acyclic graph.
+
+    Returns
+    -------
+    list of lists
+        The paths in a minimum path cover of `G`. Paths are ordered by their
+        first node using the insertion order of the nodes in `G`.
+
+    Raises
+    ------
+    NetworkXNotImplemented
+        If `G` is undirected or a multigraph.
+    NetworkXUnfeasible
+        If `G` contains a cycle.
+
+    Examples
+    --------
+    >>> G = nx.DiGraph([("a", "b"), ("a", "c"), ("b", "d"), ("c", "d")])
+    >>> G.add_node("e")
+    >>> nx.minimum_path_cover(G)
+    [['a', 'b', 'd'], ['c'], ['e']]
+
+    Notes
+    -----
+    Ties between maximum matchings are resolved according to the insertion
+    order of nodes in `G`, so repeated calls on an unchanged graph return
+    the same cover.
+    """
+    if has_cycle(G):
+        msg = "minimum_path_cover is only defined for acyclic graphs"
+        raise nx.NetworkXUnfeasible(msg)
+
+    nodes = list(G)
+    node_index = {node: index for index, node in enumerate(nodes)}
+
+    adjacency = [
+        sorted(node_index[neighbor] for neighbor in G.neighbors(node))
+        for node in nodes
+    ]
+
+    unmatched = None
+    left_match = [unmatched] * len(nodes)
+    right_match = [unmatched] * len(nodes)
+    visited_right = [False] * len(nodes)
+
+    def augment(left):
+        stack = [[left, 0, unmatched]]
+
+        while stack:
+            frame = stack[-1]
+            current_left = frame[0]
+            neighbor_index = frame[1]
+
+            if neighbor_index == len(adjacency[current_left]):
+                stack.pop()
+                continue
+
+            right = adjacency[current_left][neighbor_index]
+            frame[1] += 1
+
+            if visited_right[right]:
+                continue
+            visited_right[right] = True
+
+            matched_left = right_match[right]
+            frame[2] = right
+            if matched_left is not unmatched:
+                stack.append([matched_left, 0, unmatched])
+                continue
+
+            while stack:
+                path_left, _, path_right = stack.pop()
+                left_match[path_left] = path_right
+                right_match[path_right] = path_left
+            return True
+
+        return False
+
+    for left in range(len(nodes)):
+        visited_right = [False] * len(nodes)
+        augment(left)
+
+    next_node = {
+        nodes[left]: nodes[right]
+        for left, right in enumerate(left_match)
+        if right is not unmatched
+    }
+    matched_right = {
+        nodes[right]
+        for right, matched_left in enumerate(right_match)
+        if matched_left is not unmatched
+    }
+    path_starts = set(nodes) - matched_right
+
+    paths = []
+    for start in nodes:
+        if start not in path_starts:
+            continue
+
+        path = []
+        node = start
+        while node is not None:
+            path.append(node)
+            node = next_node.get(node)
+        paths.append(path)
+
+    return paths
 
 
 @nx._dispatchable

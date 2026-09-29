@@ -7,6 +7,155 @@ import networkx as nx
 from networkx.utils import edges_equal, pairwise
 
 
+class TestMinimumPathCover:
+    def test_diamond_with_isolated_node(self):
+        G = nx.DiGraph([("a", "b"), ("a", "c"), ("b", "d"), ("c", "d")])
+        G.add_node("e")
+
+        cover = nx.minimum_path_cover(G)
+
+        assert len(cover) == 3
+        assert cover == [["a", "b", "d"], ["c"], ["e"]]
+        self._assert_valid_cover(G, cover)
+
+    def test_empty_graph(self):
+        assert nx.minimum_path_cover(nx.DiGraph()) == []
+
+    def test_chain(self):
+        G = nx.DiGraph([(1, 2), (2, 3), (3, 4)])
+        cover = nx.minimum_path_cover(G)
+
+        assert cover == [[1, 2, 3, 4]]
+        self._assert_valid_cover(G, cover)
+
+    def test_diamond(self):
+        G = nx.DiGraph([("a", "b"), ("a", "c"), ("b", "d"), ("c", "d")])
+        cover = nx.minimum_path_cover(G)
+
+        assert len(cover) == 2
+        assert cover == [["a", "b", "d"], ["c"]]
+        self._assert_valid_cover(G, cover)
+
+    def test_only_direct_edges_are_used(self):
+        G = nx.DiGraph([(1, 2), (1, 3), (2, 3)])
+        cover = nx.minimum_path_cover(G)
+
+        assert cover == [[1, 2, 3]]
+        for path in cover:
+            assert all(G.has_edge(u, v) for u, v in pairwise(path))
+
+    def test_indirect_reachability_is_not_a_direct_edge(self):
+        G = nx.DiGraph(
+            [("a", "b"), ("b", "c"), ("a", "d"), ("d", "c")]
+        )
+
+        cover = nx.minimum_path_cover(G)
+
+        assert len(cover) == 2
+        for path in cover:
+            assert all(G.has_edge(u, v) for u, v in pairwise(path))
+
+    def test_repeated_calls_and_tie_breaking_are_stable(self):
+        G1 = nx.DiGraph()
+        G1.add_nodes_from(range(4))
+        G1.add_edges_from([(0, 2), (0, 3), (1, 2), (1, 3)])
+        G2 = nx.DiGraph()
+        G2.add_nodes_from(reversed(range(4)))
+        G2.add_edges_from([(2, 0), (3, 0), (2, 1), (3, 1)])
+
+        first_cover = nx.minimum_path_cover(G1)
+        second_cover = nx.minimum_path_cover(G2)
+
+        assert first_cover == nx.minimum_path_cover(G1)
+        assert second_cover == nx.minimum_path_cover(G2)
+        assert first_cover == [[0, 3], [1, 2]]
+        assert second_cover == [[3, 0], [2, 1]]
+
+    def test_returned_paths_do_not_alias_graph_data(self):
+        G = nx.DiGraph()
+        G.add_node("a", value=1)
+        G.add_node("b", value=2)
+        G.add_edge("a", "b", weight=3)
+        before_nodes = dict(G.nodes(data=True))
+        before_edges = {(u, v): dict(data) for u, v, data in G.edges(data=True)}
+
+        cover = nx.minimum_path_cover(G)
+        cover[0].append("c")
+
+        assert dict(G.nodes(data=True)) == before_nodes
+        assert {(u, v): dict(data) for u, v, data in G.edges(data=True)} == before_edges
+        assert list(G.nodes) == ["a", "b"]
+
+    @pytest.mark.parametrize("n", range(7))
+    def test_forward_edge_dags_up_to_six_nodes(self, n):
+        possible_edges = tuple(combinations(range(n), 2))
+
+        for edge_bits in range(1 << len(possible_edges)):
+            edges = [
+                edge
+                for position, edge in enumerate(possible_edges)
+                if edge_bits & (1 << position)
+            ]
+            G = nx.DiGraph()
+            G.add_nodes_from(range(n))
+            G.add_edges_from(edges)
+            cover = nx.minimum_path_cover(G)
+
+            self._assert_valid_cover(G, cover)
+            assert len(cover) == self._brute_force_path_count(n, edges)
+            assert cover == nx.minimum_path_cover(G)
+
+    def test_cyclic_graph(self):
+        G = nx.DiGraph([(1, 2), (2, 3), (3, 1)])
+
+        with pytest.raises(nx.NetworkXUnfeasible, match="acyclic"):
+            nx.minimum_path_cover(G)
+
+    @pytest.mark.parametrize("graph_type", [nx.Graph, nx.MultiDiGraph])
+    def test_unsupported_graph_types(self, graph_type):
+        with pytest.raises(nx.NetworkXNotImplemented):
+            nx.minimum_path_cover(graph_type([(1, 2), (2, 3)]))
+
+    @staticmethod
+    def _assert_valid_cover(G, cover):
+        covered = [node for path in cover for node in path]
+
+        assert set(covered) == set(G)
+        assert len(covered) == len(G)
+        for path in cover:
+            assert all(G.has_edge(u, v) for u, v in pairwise(path))
+
+    @staticmethod
+    def _brute_force_path_count(n, edges):
+        graph = [0] * n
+        for u, v in edges:
+            graph[u] |= 1 << v
+
+        can_be_path = [False] * (1 << n)
+        for mask in range(1, 1 << n):
+            last = mask.bit_length() - 1
+            remaining = mask ^ (1 << last)
+            if remaining == 0:
+                can_be_path[mask] = True
+            else:
+                previous = remaining.bit_length() - 1
+                can_be_path[mask] = can_be_path[remaining] and bool(
+                    graph[previous] & (1 << last)
+                )
+
+        minimum_paths = [0] * (1 << n)
+        for mask in range(1, 1 << n):
+            candidate = mask
+            best = n
+            while candidate:
+                if can_be_path[candidate]:
+                    best = min(best, minimum_paths[mask ^ candidate] + 1)
+                candidate = (candidate - 1) & mask
+            minimum_paths[mask] = best
+
+        return minimum_paths[-1]
+
+
 # Recipe from the itertools documentation.
 def _consume(iterator):
     "Consume the iterator entirely."
