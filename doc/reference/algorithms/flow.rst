@@ -101,3 +101,12 @@ Capacity Scaling Minimum Cost Flow
    :toctree: generated/
 
     capacity_scaling
+
+.. _networkx.algorithms.flow.circulation:
+
+Circulation With Lower Bounds
+-----------------------------
+.. autosummary::
+   :toctree: generated/
+
+   lower_bound_circulation

@@ -7,5 +7,6 @@ from .gomory_hu import *
 from .preflowpush import *
 from .shortestaugmentingpath import *
 from .capacityscaling import *
+from .circulation import *
 from .networksimplex import *
 from .utils import build_flow_dict, build_residual_network

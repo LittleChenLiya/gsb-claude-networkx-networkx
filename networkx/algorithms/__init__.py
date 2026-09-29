@@ -108,6 +108,8 @@ from networkx.algorithms.connectivity import stoer_wagner
 from networkx.algorithms.flow import capacity_scaling
 from networkx.algorithms.flow import cost_of_flow
 from networkx.algorithms.flow import gomory_hu_tree
+from networkx.algorithms.flow import InfeasibleCirculation
+from networkx.algorithms.flow import lower_bound_circulation
 from networkx.algorithms.flow import max_flow_min_cost
 from networkx.algorithms.flow import maximum_flow
 from networkx.algorithms.flow import maximum_flow_value
