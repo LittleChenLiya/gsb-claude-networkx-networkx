@@ -13,6 +13,8 @@ Directed Acyclic Graphs
    topological_generations
    all_topological_sorts
    lexicographical_topological_sort
+   IncrementalTopologicalOrder
+   IncrementalTopologicalOrderBatchResult
    is_directed_acyclic_graph
    is_aperiodic
    transitive_closure

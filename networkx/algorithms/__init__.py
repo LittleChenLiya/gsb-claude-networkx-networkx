@@ -17,6 +17,7 @@ from networkx.algorithms.cycles import *
 from networkx.algorithms.cuts import *
 from networkx.algorithms.d_separation import *
 from networkx.algorithms.dag import *
+from networkx.algorithms.incremental_topological_order import *
 from networkx.algorithms.distance_measures import *
 from networkx.algorithms.distance_regular import *
 from networkx.algorithms.dominance import *
