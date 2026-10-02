@@ -1,6 +1,15 @@
+from copy import deepcopy
+
 import networkx as nx
 
-__all__ = ["convert_node_labels_to_integers", "relabel_nodes"]
+__all__ = [
+    "convert_node_labels_to_integers",
+    "relabel_nodes",
+    "RelabelConflictError",
+    "RelabelPlan",
+    "plan_relabel",
+    "apply_relabel_plan",
+]
 
 
 @nx._dispatchable(
@@ -287,4 +296,197 @@ def convert_node_labels_to_integers(
     # create node attribute with the old label
     if label_attribute is not None:
         nx.set_node_attributes(H, {v: k for k, v in mapping.items()}, label_attribute)
+    return H
+
+
+class RelabelConflictError(nx.NetworkXException):
+    """Raised when a graph no longer matches a previously generated relabel plan."""
+
+
+class RelabelPlan:
+    """An immutable, batch node-relabeling plan produced by :func:`plan_relabel`.
+
+    The plan records the node mapping together with a fingerprint of the
+    graph (its node set and its edges, including edge keys for multigraphs)
+    taken when the plan was generated.  :func:`apply_relabel_plan` refuses
+    to apply the plan to a graph whose nodes or edges have changed since.
+    """
+
+    __slots__ = ("mapping", "directed", "multigraph", "nodes", "edges")
+
+    def __init__(self, mapping, directed, multigraph, nodes, edges):
+        self.mapping = mapping
+        self.directed = directed
+        self.multigraph = multigraph
+        self.nodes = nodes
+        self.edges = edges
+
+    def __repr__(self):
+        return (
+            f"RelabelPlan(mapping={self.mapping!r}, directed={self.directed}, "
+            f"multigraph={self.multigraph}, nodes={len(self.nodes)}, "
+            f"edges={len(self.edges)})"
+        )
+
+
+def _edge_fingerprint(G, directed, multigraph):
+    """Return a hashable snapshot of the edges of ``G`` (keys included)."""
+    if multigraph:
+        if directed:
+            return {(u, v, k) for u, v, k in G.edges(keys=True)}
+        return {(frozenset((u, v)), k) for u, v, k in G.edges(keys=True)}
+    if directed:
+        return set(G.edges())
+    return {frozenset((u, v)) for u, v in G.edges()}
+
+
+def plan_relabel(G, mapping):
+    """Create a :class:`RelabelPlan` describing a batch node relabeling of ``G``.
+
+    The graph itself is not modified.  The plan can later be executed with
+    :func:`apply_relabel_plan`, which operates on a copy and verifies that
+    the graph still matches the state captured here.
+
+    Parameters
+    ----------
+    G : graph
+       A NetworkX graph.
+
+    mapping : dictionary or callable
+       A dictionary with the old labels as keys and new labels as values,
+       or a callable mapping old labels to new labels.  Every key must be
+       a node of ``G``.  A partial mapping is allowed; nodes not present
+       in the mapping keep their labels.  Swapping two labels (e.g.
+       ``{"a": "b", "b": "a"}``) is supported.
+
+    Returns
+    -------
+    RelabelPlan
+       The plan to pass to :func:`apply_relabel_plan`.
+
+    Raises
+    ------
+    NetworkXError
+       If a mapping key is not a node of ``G``, if two nodes would be
+       merged into a single target label, or if a target label collides
+       with an existing node that is not itself being renamed.
+
+    Examples
+    --------
+    >>> G = nx.path_graph(["a", "b", "c"], create_using=nx.DiGraph)
+    >>> plan = nx.plan_relabel(G, {"a": "b", "b": "a"})  # swap two labels
+    >>> H = nx.apply_relabel_plan(G, plan)
+    >>> sorted(H.edges())
+    [('a', 'c'), ('b', 'a')]
+
+    See Also
+    --------
+    apply_relabel_plan
+    relabel_nodes
+    """
+    m = {n: mapping(n) for n in G} if callable(mapping) else dict(mapping)
+
+    nodes = set(G)
+    unknown = [n for n in m if n not in nodes]
+    if unknown:
+        raise nx.NetworkXError(
+            f"Mapping keys are not nodes of the graph: {unknown!r}. "
+            "The mapping must cover only nodes to be renamed."
+        )
+
+    targets = list(m.values())
+    if len(set(targets)) != len(targets):
+        raise nx.NetworkXError(
+            f"Mapping would merge multiple nodes into one target: {targets!r}."
+        )
+
+    renamed = set(m)
+    collisions = [t for t in targets if t in nodes and t not in renamed]
+    if collisions:
+        raise nx.NetworkXError(
+            f"Target labels collide with existing nodes that are not "
+            f"being renamed: {collisions!r}."
+        )
+
+    directed = G.is_directed()
+    multigraph = G.is_multigraph()
+    return RelabelPlan(
+        mapping=m,
+        directed=directed,
+        multigraph=multigraph,
+        nodes=frozenset(nodes),
+        edges=frozenset(_edge_fingerprint(G, directed, multigraph)),
+    )
+
+
+def apply_relabel_plan(G, plan):
+    """Apply a :class:`RelabelPlan` to ``G``, returning a new relabeled graph.
+
+    The input graph is never modified.  Before relabeling, the nodes and
+    edges (including edge keys for multigraphs) of ``G`` are compared with
+    the fingerprint stored in ``plan``; if they differ, the whole batch is
+    rejected and no partially relabeled graph is returned.  Node, edge and
+    graph attributes are deep-copied, so the returned graph shares no
+    mutable attribute containers with ``G``.
+
+    Parameters
+    ----------
+    G : graph
+       A NetworkX graph, expected to be unchanged since ``plan`` was made.
+
+    plan : RelabelPlan
+       A plan created by :func:`plan_relabel`.
+
+    Returns
+    -------
+    graph
+       A new graph of the same class as ``G`` with the relabeling applied.
+
+    Raises
+    ------
+    RelabelConflictError
+       If the graph's type, nodes or edges no longer match the plan.
+
+    See Also
+    --------
+    plan_relabel
+    relabel_nodes
+    """
+    if not isinstance(plan, RelabelPlan):
+        raise nx.NetworkXError("plan must be a RelabelPlan created by plan_relabel.")
+    if G.is_directed() != plan.directed or G.is_multigraph() != plan.multigraph:
+        raise RelabelConflictError(
+            "Graph type (directed/multigraph) no longer matches the relabel plan."
+        )
+    if set(G.nodes) != plan.nodes:
+        raise RelabelConflictError(
+            "Graph nodes changed since the relabel plan was generated: "
+            f"added={set(G.nodes) - plan.nodes!r}, "
+            f"removed={plan.nodes - set(G.nodes)!r}."
+        )
+    current_edges = _edge_fingerprint(G, plan.directed, plan.multigraph)
+    if current_edges != plan.edges:
+        raise RelabelConflictError(
+            "Graph edges changed since the relabel plan was generated: "
+            f"added={current_edges - plan.edges!r}, "
+            f"removed={plan.edges - current_edges!r}."
+        )
+
+    m = plan.mapping
+    H = G.__class__()
+    H.graph.update(deepcopy(G.graph))
+    for n, data in G.nodes(data=True):
+        new = m.get(n, n)
+        H.add_node(new)
+        H.nodes[new].update(deepcopy(data))
+    if plan.multigraph:
+        for u, v, k, data in G.edges(keys=True, data=True):
+            new_u, new_v = m.get(u, u), m.get(v, v)
+            H.add_edge(new_u, new_v, key=k)
+            H[new_u][new_v][k].update(deepcopy(data))
+    else:
+        for u, v, data in G.edges(data=True):
+            new_u, new_v = m.get(u, u), m.get(v, v)
+            H.add_edge(new_u, new_v)
+            H[new_u][new_v].update(deepcopy(data))
     return H
