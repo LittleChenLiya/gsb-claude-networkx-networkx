@@ -53,6 +53,7 @@ from networkx.algorithms.structuralholes import *
 from networkx.algorithms.sparsifiers import *
 from networkx.algorithms.summarization import *
 from networkx.algorithms.swap import *
+from networkx.algorithms.team_projection import *
 from networkx.algorithms.time_dependent import *
 from networkx.algorithms.traversal import *
 from networkx.algorithms.triads import *
