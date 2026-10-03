@@ -71,6 +71,7 @@ Algorithms
    structuralholes
    summarization
    swap
+   team
    threshold
    time_dependent
    tournament
