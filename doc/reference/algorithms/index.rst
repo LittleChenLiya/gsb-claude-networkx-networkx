@@ -35,6 +35,7 @@ Algorithms
    distance_measures
    distance_regular
    dominance
+   gate
    dominating
    efficiency_measures
    euler
