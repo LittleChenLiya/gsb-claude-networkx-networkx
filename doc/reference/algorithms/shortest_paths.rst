@@ -202,6 +202,24 @@ Advanced Interface
    johnson
 
 
+Reversible Edges
+----------------
+
+For a directed graph, an edge may sometimes be allowed to be walked
+temporarily against its direction. Forward use of every edge has cost 0,
+while an edge marked with a truthy ``reversible`` attribute may be traversed
+backwards at cost 1. The 0-1 shortest path then minimizes the number of
+backward traversals and also reports the exact directed edge sequence
+(including the key of parallel edges).
+
+.. automodule:: networkx.algorithms.shortest_paths.reversible
+.. autosummary::
+   :toctree: generated/
+
+   minimum_reversals_path
+   TraversedEdge
+
+
 Dense Graphs
 ------------
 
