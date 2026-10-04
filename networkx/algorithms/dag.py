@@ -5,6 +5,7 @@ In general, these functions do not check for acyclic-ness, so it is up
 to the user to check for that.
 """
 
+import hashlib
 import heapq
 from collections import deque
 from itertools import combinations, product
@@ -21,6 +22,7 @@ __all__ = [
     "all_topological_sorts",
     "topological_generations",
     "is_directed_acyclic_graph",
+    "CompletionFrontier",
     "is_aperiodic",
     "transitive_closure",
     "transitive_closure_dag",
@@ -170,6 +172,277 @@ def is_directed_acyclic_graph(G):
     topological_sort
     """
     return G.is_directed() and not has_cycle(G)
+
+
+class CompletionFrontier:
+    """Maintain the completion frontier of a directed acyclic graph (DAG).
+
+    A *completion frontier* records which tasks (nodes) of a DAG have been
+    completed and which tasks are currently executable -- all of their
+    prerequisites (predecessors) are completed. The frontier never executes
+    tasks itself; it only records completion and releases the successors
+    whose prerequisites have all become satisfied.
+
+    The graph passed to the constructor is snapshotted: later modifications
+    to the caller's graph do not affect the frontier. The frontier rejects
+    graphs containing cycles and, when built from an edge iterable,
+    duplicate edges (each dependency must be declared exactly once).
+
+    Completion state can be exported as a checkpoint and restored later.
+    Every checkpoint is bound to a fingerprint of the graph structure, so a
+    checkpoint exported from one graph cannot be loaded into another graph.
+
+    Parameters
+    ----------
+    graph : NetworkX DiGraph or iterable of (u, v) edges
+        A directed acyclic graph, or an iterable of ``(u, v)`` edges.
+
+    Attributes
+    ----------
+    fingerprint : str
+        SHA-256 fingerprint of the graph structure (node set and edges).
+    ready : tuple of nodes
+        Nodes that are currently executable, in the graph's node order.
+    completed : tuple of nodes
+        Nodes that have been completed, in the graph's node order.
+
+    Raises
+    ------
+    ValueError
+        If the graph is undirected or contains a cycle, or if an edge
+        iterable contains duplicate edges.
+
+    Examples
+    --------
+    >>> G = nx.DiGraph([("a", "c"), ("b", "c"), ("c", "d")])
+    >>> frontier = nx.CompletionFrontier(G)
+    >>> frontier.ready
+    ('a', 'b')
+    >>> _ = frontier.complete("a")
+    >>> frontier.ready  # c is not released: b is still pending
+    ('b',)
+    >>> _ = frontier.complete("b")
+    >>> frontier.ready
+    ('c',)
+
+    Completing a node twice is idempotent:
+
+    >>> _ = frontier.complete("b")
+    >>> frontier.completed
+    ('a', 'b')
+
+    A node cannot be completed before it is executable:
+
+    >>> nx.CompletionFrontier(G).complete("c")
+    Traceback (most recent call last):
+        ...
+    ValueError: node 'c' is not executable yet (not all prerequisites completed)
+
+    Export a checkpoint and restore it on a fresh frontier of the same graph:
+
+    >>> checkpoint = frontier.checkpoint()
+    >>> sorted(checkpoint)
+    ['completed', 'fingerprint', 'format']
+    >>> checkpoint["completed"]
+    ['a', 'b']
+    >>> nx.CompletionFrontier(G).restore(checkpoint).ready
+    ('c',)
+
+    A checkpoint cannot be loaded into a different graph:
+
+    >>> other = nx.DiGraph([("x", "y")])
+    >>> nx.CompletionFrontier(other).restore(checkpoint)
+    Traceback (most recent call last):
+        ...
+    ValueError: checkpoint fingerprint does not match this graph; refusing to load a foreign checkpoint
+    """
+
+    checkpoint_format = "networkx.CompletionFrontier/v1"
+
+    def __init__(self, graph):
+        if isinstance(graph, nx.Graph):
+            if not graph.is_directed():
+                raise ValueError(
+                    "CompletionFrontier requires a directed graph, "
+                    "got an undirected graph"
+                )
+            # Independent snapshot: later edge/node mutations of the
+            # caller's graph do not affect the frontier.
+            snapshot = graph.copy()
+        else:
+            snapshot = nx.DiGraph()
+            seen = set()
+            for edge in graph:
+                u, v = edge[0], edge[1]
+                if (u, v) in seen:
+                    raise ValueError(
+                        f"duplicate edge {u!r}->{v!r} in input; "
+                        "each dependency must be declared exactly once"
+                    )
+                seen.add((u, v))
+                snapshot.add_edge(u, v)
+        if not is_directed_acyclic_graph(snapshot):
+            raise ValueError(
+                "graph contains a cycle; a completion frontier "
+                "requires a directed acyclic graph"
+            )
+        self._graph = snapshot
+        self._nodes = tuple(snapshot.nodes)
+        self._node_set = set(self._nodes)
+        self._completed = set()
+        self._recompute_ready()
+
+    @property
+    def graph(self):
+        """The internal graph snapshot used by this frontier."""
+        return self._graph
+
+    @property
+    def fingerprint(self):
+        """SHA-256 fingerprint of the graph structure.
+
+        The fingerprint covers the node set (in node order) and the set of
+        directed edges. Two frontiers with the same graph structure share
+        the same fingerprint.
+        """
+        h = hashlib.sha256()
+        h.update(self.checkpoint_format.encode("utf-8"))
+        h.update(b"\n")
+        h.update(repr(self._nodes).encode("utf-8"))
+        h.update(b"\n")
+        edges = sorted(self._graph.edges, key=lambda e: (repr(e[0]), repr(e[1])))
+        for u, v in edges:
+            h.update(repr((u, v)).encode("utf-8"))
+            h.update(b"\n")
+        return h.hexdigest()
+
+    @property
+    def ready(self):
+        """Nodes that are currently executable, in the graph's node order."""
+        return tuple(node for node in self._nodes if node in self._ready)
+
+    @property
+    def completed(self):
+        """Nodes that have been completed, in the graph's node order."""
+        return tuple(node for node in self._nodes if node in self._completed)
+
+    def complete(self, node):
+        """Mark `node` as completed.
+
+        Completing a node that is already completed is a no-op (idempotent).
+        Completing a node that is not currently executable raises
+        `ValueError`.
+
+        Returns
+        -------
+        self
+        """
+        if node not in self._node_set:
+            raise ValueError(f"node {node!r} is not in the graph")
+        if node in self._completed:
+            return self
+        if node not in self._ready:
+            raise ValueError(
+                f"node {node!r} is not executable yet (not all prerequisites completed)"
+            )
+        self._completed.add(node)
+        self._ready.discard(node)
+        for successor in self._graph.successors(node):
+            if successor not in self._completed and all(
+                predecessor in self._completed
+                for predecessor in self._graph.predecessors(successor)
+            ):
+                self._ready.add(successor)
+        return self
+
+    def checkpoint(self):
+        """Export the completion state as a checkpoint.
+
+        The checkpoint is a dict with three keys:
+
+        ``"format"``
+            fixed format identifier (``"networkx.CompletionFrontier/v1"``)
+        ``"fingerprint"``
+            SHA-256 fingerprint binding the checkpoint to the graph
+            structure
+        ``"completed"``
+            list of completed nodes in the graph's node order
+
+        Returns
+        -------
+        dict
+        """
+        return {
+            "format": self.checkpoint_format,
+            "fingerprint": self.fingerprint,
+            "completed": list(self.completed),
+        }
+
+    def restore(self, checkpoint):
+        """Restore completion state from a checkpoint.
+
+        The checkpoint's fingerprint must match this frontier's graph;
+        otherwise `ValueError` is raised and the current state is left
+        untouched. The checkpoint is also validated: every completed node
+        must belong to the graph and every prerequisite of a completed node
+        must itself be completed (no illegal early completion).
+
+        Returns
+        -------
+        self
+        """
+        if not isinstance(checkpoint, dict):
+            raise TypeError("checkpoint must be a mapping")
+        if checkpoint.get("fingerprint") != self.fingerprint:
+            raise ValueError(
+                "checkpoint fingerprint does not match this graph; "
+                "refusing to load a foreign checkpoint"
+            )
+        completed = checkpoint.get("completed")
+        if completed is None:
+            raise ValueError("checkpoint is missing a 'completed' entry")
+        completed_set = set()
+        for node in completed:
+            if node not in self._node_set:
+                raise ValueError(
+                    f"checkpoint references node {node!r} which is not in the graph"
+                )
+            completed_set.add(node)
+        for node in completed_set:
+            for predecessor in self._graph.predecessors(node):
+                if predecessor not in completed_set:
+                    raise ValueError(
+                        f"invalid checkpoint: node {node!r} is marked "
+                        f"completed but its prerequisite {predecessor!r} "
+                        "is not"
+                    )
+        self._completed = completed_set
+        self._recompute_ready()
+        return self
+
+    @classmethod
+    def from_checkpoint(cls, graph, checkpoint):
+        """Create a frontier for `graph` and restore `checkpoint` on it."""
+        frontier = cls(graph)
+        frontier.restore(checkpoint)
+        return frontier
+
+    def _recompute_ready(self):
+        self._ready = {
+            node
+            for node in self._nodes
+            if node not in self._completed
+            and all(
+                predecessor in self._completed
+                for predecessor in self._graph.predecessors(node)
+            )
+        }
+
+    def __repr__(self):
+        return (
+            f"<{self.__class__.__name__} nodes={len(self._nodes)} "
+            f"completed={len(self._completed)} ready={len(self._ready)}>"
+        )
 
 
 @not_implemented_for("undirected")
