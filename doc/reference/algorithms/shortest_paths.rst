@@ -226,6 +226,15 @@ A* Algorithm
    astar_path
    astar_path_length
 
+Reversible Edges
+----------------
+
+.. automodule:: networkx.algorithms.shortest_paths.reversible
+.. autosummary::
+   :toctree: generated/
+
+   shortest_path_with_reversals
+
 Notes on Multi-Target Shortest Path Queries
 -------------------------------------------
 
