@@ -1,11 +1,12 @@
 """Bridge-finding algorithms."""
 
+import copy
 from itertools import chain
 
 import networkx as nx
 from networkx.utils import not_implemented_for
 
-__all__ = ["bridges", "has_bridges", "local_bridges"]
+__all__ = ["bridge_contraction", "bridges", "has_bridges", "local_bridges"]
 
 
 @not_implemented_for("directed")
@@ -203,3 +204,206 @@ def local_bridges(G, with_span=True, weight=None):
                     yield u, v, span
                 except nx.NetworkXNoPath:
                     yield u, v, float("inf")
+
+
+@not_implemented_for("directed")
+@nx._dispatchable(returns_graph=True)
+def bridge_contraction(G, create_using=None):
+    """Returns the bridge contraction of `G`.
+
+    The *bridge contraction* of an undirected graph `G` is the graph
+    obtained by contracting each connected component of `G` after all
+    bridges have been removed into a single node, and turning each bridge
+    of `G` into an edge between the nodes representing the components it
+    joins. The bridge contraction is also known as the *bridge tree* (or
+    *bridge forest*) of `G`; it is a tree whenever `G` is connected and a
+    forest otherwise.
+
+    Each node of the returned graph represents a connected component of
+    `G` with all bridges removed. The nodes are labeled by nonnegative
+    integers in increasing order according to the first appearance of
+    their members in `G.nodes`. Each edge of the returned graph
+    represents a bridge of `G`.
+
+    The mapping from each original node to its block is stored in the
+    graph attribute ``"mapping"`` of the returned graph. The original
+    nodes and non-bridge edges contained in each block are stored as the
+    node attributes ``"sources"`` and ``"edges"``, respectively. The
+    identity of the original bridge edge corresponding to each block
+    edge is stored as the edge attribute ``"source"``.
+
+    Parameters
+    ----------
+    G : undirected graph
+        The graph whose bridge contraction is to be computed.
+
+    create_using : NetworkX graph constructor, optional (default=nx.Graph)
+        Graph type to create. If graph instance, then cleared before
+        populated.
+
+    Returns
+    -------
+    H : NetworkX graph
+        The bridge contraction of `G`.
+
+    Raises
+    ------
+    NetworkXNotImplemented
+        If `G` is directed.
+
+    Examples
+    --------
+    Two triangles joined by a single bridge form two blocks connected by
+    one edge::
+
+        >>> G = nx.barbell_graph(3, 0)
+        >>> H = nx.bridge_contraction(G)
+        >>> H.nodes
+        NodeView((0, 1))
+        >>> H.edges
+        EdgeView([(0, 1)])
+        >>> H.nodes[0]["sources"]
+        (0, 1, 2)
+        >>> H.nodes[1]["sources"]
+        (3, 4, 5)
+        >>> H.edges[0, 1]["source"]
+        (2, 3)
+
+    A pair of parallel edges is not a bridge, so both edges stay in the
+    same block::
+
+        >>> G = nx.MultiGraph([(0, 1), (0, 1), (1, 2)])
+        >>> H = nx.bridge_contraction(G)
+        >>> H.nodes
+        NodeView((0, 1))
+        >>> H.edges
+        EdgeView([(0, 1)])
+        >>> H.nodes[0]["edges"]
+        ((0, 1, 0), (0, 1, 1))
+        >>> H.edges[0, 1]["source"]
+        (1, 2, 0)
+
+    An isolated node forms its own block::
+
+        >>> G = nx.Graph([(0, 1)])
+        >>> G.add_node(2)
+        >>> H = nx.bridge_contraction(G)
+        >>> H.nodes
+        NodeView((0, 1, 2))
+        >>> H.nodes[2]["sources"]
+        (2,)
+
+    The node mapping is stored as a graph attribute::
+
+        >>> G = nx.path_graph(4)
+        >>> H = nx.bridge_contraction(G)
+        >>> H.graph["mapping"]
+        {0: 0, 1: 1, 2: 2, 3: 3}
+
+    Notes
+    -----
+    This function uses :func:`bridges` to find the bridges of `G`, so
+    parallel edges in a multigraph are never mistaken for bridges.
+    Self-loops are not bridges and remain within their block.
+
+    All attributes copied from `G` onto the returned graph are
+    independent copies; mutating the attributes of the returned graph
+    does not affect `G` and vice versa.
+
+    See Also
+    --------
+    bridges : find all bridges in a graph
+    bridge_components : generator of 2-edge-connected components
+    quotient_graph : quotient graph under an equivalence relation on nodes
+    contracted_nodes : contract two nodes of a graph
+
+    References
+    ----------
+    .. [1] https://en.wikipedia.org/wiki/Bridge_%28graph_theory%29#Bridge_tree
+    """
+    if create_using is None:
+        H = nx.Graph()
+    else:
+        H = nx.empty_graph(0, create_using)
+
+    multigraph = G.is_multigraph()
+
+    # Find all bridges. `nx.bridges` handles multigraphs correctly:
+    # parallel edges are never bridges.
+    bridge_set = set()
+    bridge_edges = []
+    for u, v in nx.bridges(G):
+        if multigraph:
+            # A bridge in a multigraph has no parallel twin, so there is
+            # exactly one edge between u and v.
+            key = next(iter(G[u][v]))
+        else:
+            key = None
+        bridge_edges.append((u, v, key))
+        bridge_set.add((u, v))
+        bridge_set.add((v, u))
+
+    # Build the blocks as connected components of G with all bridges
+    # removed, using a union-find over the non-bridge edges.
+    uf = nx.utils.UnionFind()
+    nonbridge_edges = []
+    if multigraph:
+        all_edges = G.edges(keys=True)
+    else:
+        all_edges = ((u, v, None) for u, v in G.edges())
+    for u, v, key in all_edges:
+        if (u, v) not in bridge_set and (v, u) not in bridge_set:
+            uf.union(u, v)
+            nonbridge_edges.append((u, v, key))
+
+    # Order the blocks by first appearance in G.nodes.
+    block_of = {}
+    blocks = []
+    block_index = {}
+    for n in G.nodes:
+        root = uf[n]
+        if root not in block_index:
+            block_index[root] = len(blocks)
+            blocks.append([])
+        block_of[n] = block_index[root]
+        blocks[block_index[root]].append(n)
+
+    # Record the non-bridge edges within each block, in G.edges order.
+    block_edges = [[] for _ in blocks]
+    for u, v, key in nonbridge_edges:
+        b = block_of[u]
+        if multigraph:
+            block_edges[b].append((u, v, key))
+        else:
+            block_edges[b].append((u, v))
+
+    # Build the output graph.
+    H.add_nodes_from(range(len(blocks)))
+    for i, sources in enumerate(blocks):
+        H.nodes[i]["sources"] = tuple(sources)
+        H.nodes[i]["edges"] = tuple(block_edges[i])
+
+    for u, v, key in bridge_edges:
+        b, c = block_of[u], block_of[v]
+        H.add_edge(b, c)
+        if H.is_multigraph():
+            ekey = next(iter(H[b][c]))
+            edge_view = H.edges[b, c, ekey]
+        else:
+            edge_view = H.edges[b, c]
+        if multigraph:
+            edge_view["source"] = (u, v, key)
+            edge_data = G.get_edge_data(u, v, key)
+        else:
+            edge_view["source"] = (u, v)
+            edge_data = G.get_edge_data(u, v)
+        for attr, value in edge_data.items():
+            edge_view[attr] = copy.deepcopy(value)
+
+    # Graph-level mapping and attributes.
+    H.graph["mapping"] = dict(block_of)
+    for attr, value in G.graph.items():
+        if attr != "mapping":
+            H.graph[attr] = copy.deepcopy(value)
+
+    return H

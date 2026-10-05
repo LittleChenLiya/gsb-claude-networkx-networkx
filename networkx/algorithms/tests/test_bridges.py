@@ -142,3 +142,149 @@ class TestLocalBridges:
         expected = {(u, v, 6) for u, v in G.edges}
         lb = nx.local_bridges(G, weight=lambda u, v, d: 2)
         assert set(lb) == expected
+
+
+class TestBridgeContraction:
+    """Unit tests for the bridge_contraction function."""
+
+    def test_barbell_two_blocks(self):
+        # Two triangles joined by a single bridge form two blocks.
+        G = nx.barbell_graph(3, 0)
+        H = nx.bridge_contraction(G)
+        assert list(H.nodes) == [0, 1]
+        assert list(H.edges) == [(0, 1)]
+        assert H.nodes[0]["sources"] == (0, 1, 2)
+        assert H.nodes[1]["sources"] == (3, 4, 5)
+        assert H.edges[0, 1]["source"] == (2, 3)
+        assert H.graph["mapping"] == {
+            0: 0,
+            1: 0,
+            2: 0,
+            3: 1,
+            4: 1,
+            5: 1,
+        }
+
+    def test_parallel_edges_same_block(self):
+        # A pair of parallel edges is not a bridge, so both stay in the
+        # same block.
+        G = nx.MultiGraph([(0, 1), (0, 1), (1, 2)])
+        H = nx.bridge_contraction(G)
+        assert list(H.nodes) == [0, 1]
+        assert list(H.edges) == [(0, 1)]
+        assert H.nodes[0]["sources"] == (0, 1)
+        assert H.nodes[0]["edges"] == ((0, 1, 0), (0, 1, 1))
+        assert H.edges[0, 1]["source"] == (1, 2, 0)
+        assert H.graph["mapping"] == {0: 0, 1: 0, 2: 1}
+
+    def test_isolated_node_own_block(self):
+        # A triangle stays in one block; an isolated node forms its own.
+        G = nx.Graph([(0, 1), (1, 2), (2, 0)])
+        G.add_node(3)
+        H = nx.bridge_contraction(G)
+        assert list(H.nodes) == [0, 1]
+        assert H.nodes[0]["sources"] == (0, 1, 2)
+        assert H.nodes[1]["sources"] == (3,)
+        assert H.nodes[1]["edges"] == ()
+        assert H.graph["mapping"] == {0: 0, 1: 0, 2: 0, 3: 1}
+
+    def test_self_loop_stays_in_block(self):
+        G = nx.Graph([(0, 1), (1, 2), (2, 0), (0, 0)])
+        H = nx.bridge_contraction(G)
+        assert list(H.nodes) == [0]
+        assert list(H.edges) == []
+        assert H.nodes[0]["sources"] == (0, 1, 2)
+        assert (0, 0) in H.nodes[0]["edges"]
+
+    def test_block_order_by_first_appearance(self):
+        G = nx.MultiGraph()
+        G.add_nodes_from([5, 3, 1, 2, 4])
+        G.add_edges_from([(5, 3), (3, 1), (1, 5)])  # triangle {5,3,1}
+        G.add_edges_from([(2, 4), (2, 4)])  # parallel edges -> not a bridge
+        G.add_edge(1, 2)  # bridge between the two blocks
+        H = nx.bridge_contraction(G)
+        assert H.nodes[0]["sources"] == (5, 3, 1)
+        assert H.nodes[1]["sources"] == (2, 4)
+        assert H.edges[0, 1]["source"] == (1, 2, 0)
+
+    def test_cycle_single_block(self):
+        # A cycle has no bridges, so it contracts to a single block.
+        G = nx.cycle_graph(5)
+        H = nx.bridge_contraction(G)
+        assert list(H.nodes) == [0]
+        assert list(H.edges) == []
+        assert H.nodes[0]["sources"] == tuple(range(5))
+        assert len(H.nodes[0]["edges"]) == 5
+
+    def test_path_each_node_own_block(self):
+        # Every edge in a path is a bridge, so each node is its own block.
+        G = nx.path_graph(4)
+        H = nx.bridge_contraction(G)
+        assert list(H.nodes) == [0, 1, 2, 3]
+        assert list(H.edges) == [(0, 1), (1, 2), (2, 3)]
+        assert H.graph["mapping"] == {0: 0, 1: 1, 2: 2, 3: 3}
+        for i in range(4):
+            assert H.nodes[i]["sources"] == (i,)
+
+    def test_empty_graph(self):
+        G = nx.Graph()
+        H = nx.bridge_contraction(G)
+        assert list(H.nodes) == []
+        assert list(H.edges) == []
+        assert H.graph["mapping"] == {}
+
+    def test_independent_edge_attributes(self):
+        G = nx.Graph()
+        G.add_edges_from([(0, 1), (1, 2), (2, 0)])
+        G.add_edge(0, 3, weight=42, label="bridge")
+        H = nx.bridge_contraction(G)
+        assert H.edges[0, 1]["weight"] == 42
+        assert H.edges[0, 1]["label"] == "bridge"
+        # Mutating H must not affect G.
+        H.edges[0, 1]["weight"] = 999
+        H.edges[0, 1]["new_attr"] = "x"
+        assert G[0][3]["weight"] == 42
+        assert "new_attr" not in G[0][3]
+
+    def test_independent_graph_attributes(self):
+        G = nx.Graph([(0, 1)])
+        G.graph["info"] = {"a": [1, 2, 3]}
+        H = nx.bridge_contraction(G)
+        # Mutating H must not affect G.
+        H.graph["info"]["a"].append(4)
+        assert G.graph["info"]["a"] == [1, 2, 3]
+
+    def test_independent_node_sources(self):
+        G = nx.barbell_graph(3, 0)
+        H = nx.bridge_contraction(G)
+        # sources is a tuple; mutating it must not affect G.
+        sources = H.nodes[0]["sources"]
+        assert sources == (0, 1, 2)
+        assert list(G.nodes) == [0, 1, 2, 3, 4, 5]
+
+    def test_create_using(self):
+        G = nx.MultiGraph()
+        G.add_edges_from([(0, 1), (1, 2), (2, 0)])
+        G.add_edge(0, 3)
+        H = nx.bridge_contraction(G, create_using=nx.MultiGraph)
+        assert isinstance(H, nx.MultiGraph)
+        assert list(H.edges(keys=True)) == [(0, 1, 0)]
+        assert H.edges[0, 1, 0]["source"] == (0, 3, 0)
+
+    def test_directed_raises(self):
+        with pytest.raises(nx.NetworkXNotImplemented):
+            nx.bridge_contraction(nx.DiGraph([(0, 1)]))
+
+    def test_disconnected_forest(self):
+        G = nx.Graph()
+        G.add_edges_from([(0, 1), (1, 2), (2, 0)])  # triangle
+        G.add_edge(3, 4)  # edge
+        G.add_node(5)  # isolated
+        H = nx.bridge_contraction(G)
+        assert list(H.nodes) == [0, 1, 2, 3]
+        assert list(H.edges) == [(1, 2)]
+        assert H.nodes[0]["sources"] == (0, 1, 2)
+        assert H.nodes[1]["sources"] == (3,)
+        assert H.nodes[2]["sources"] == (4,)
+        assert H.nodes[3]["sources"] == (5,)
+        assert H.edges[1, 2]["source"] == (3, 4)

@@ -8,3 +8,4 @@ Bridges
    bridges
    has_bridges
    local_bridges
+   bridge_contraction
